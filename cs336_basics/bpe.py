@@ -1,53 +1,16 @@
-######
-# ord('a') -> 97
-# chr(97) -> 'a'
+"""Utility functions for training a Byte Pair Encoding (BPE) tokenizer."""
 
-# unicode1:
-# a. chr(0) is return '\x00'
-# b. print it return nothing, the `__repr__()` is '\x00' as what we have seen above
-# c.
-# ```python
-# >>> "this is a test" + chr(0) + "string"
-# 'this is a test\x00string'
-# >>> print("this is a test" + chr(0) + "string")
-# this is a teststring
-# ```
-
-# unicode 2:
-# a. Using utf-8 instead of utf-16 or utf-32, because utf-8 provides shorter int list.
-# b. Because the code using `bytes([b]).decode`, which assume that any single bytes can be decodes,
-#    but, '你好' 's encode can't directly decode back for just a single bytes.
-# ```python
-# >>> '你'.encode('utf-8')
-# b'\xe4\xbd\xa0'
-# >>> wrong('你好'.encode('utf-8'))
-# Traceback (most recent call last):
-#   File "<stdin>", line 1, in <module>
-#   File "<stdin>", line 2, in wrong
-# UnicodeDecodeError: 'utf-8' codec can't decode byte 0xe4 in position 0: unexpected end of data
-# ```
-# c.
-# ```python
-# >>> bytes([228]).decode('utf-8')
-# Traceback (most recent call last):
-#   File "<stdin>", line 1, in <module>
-# UnicodeDecodeError: 'utf-8' codec can't decode byte 0xe4 in position 0: unexpected end of data
-# >>> bytes([228, 189]).decode('utf-8')
-# Traceback (most recent call last):
-#   File "<stdin>", line 1, in <module>
-# UnicodeDecodeError: 'utf-8' codec can't decode bytes in position 0-1: unexpected end of data
-# >>> bytes([228, 189, 160]).decode('utf-8')
-# ```
-######
+from __future__ import annotations
 
 import os
 from collections import Counter
-from multiprocessing import Pool
+from collections.abc import Iterable, Sequence
+from multiprocessing import Pool, cpu_count
 from typing import BinaryIO
 
 import regex as re
 
-PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 ENDOFTEXT: str = "<|endoftext|>"
 ENDOFTEXT_BYTES: bytes = ENDOFTEXT.encode("utf-8")
 
@@ -57,155 +20,243 @@ def find_chunk_boundaries(
     desired_num_chunks: int,
     split_special_token: bytes,
 ) -> list[int]:
-    """
-    Chunk the file into parts that can be counted independently.
-    May return fewer chunks if the boundaries end up overlapping.
-    """
-    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
+    """Return sorted byte offsets for splitting a file into processing chunks.
 
-    # Get total file size in bytes
+    Each chunk boundary is aligned with the first occurrence of the provided
+    `split_special_token` after the initial evenly spaced guess.  This ensures
+    that chunks can be processed independently without slicing a special token.
+    The first boundary is always ``0`` and the last boundary is the file size.
+    """
+    if desired_num_chunks <= 0:
+        raise ValueError("desired_num_chunks must be positive")
+    if not isinstance(split_special_token, bytes):
+        raise TypeError("split_special_token must be provided as bytes")
+
     file.seek(0, os.SEEK_END)
     file_size = file.tell()
     file.seek(0)
 
-    chunk_size = file_size // desired_num_chunks
-
-    # Initial guesses for chunk boundary locations, uniformly spaced
-    # Chunks start on previous index, don't include last index
+    chunk_size = max(1, file_size // desired_num_chunks)
     chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
+    chunk_boundaries[0] = 0
     chunk_boundaries[-1] = file_size
 
-    mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
+    mini_chunk_size = 4096  # Read ahead in reasonably sized blocks.
 
-    for bi in range(1, len(chunk_boundaries) - 1):
-        initial_position = chunk_boundaries[bi]
-        file.seek(initial_position)  # Start at boundary guess
+    for idx in range(1, len(chunk_boundaries) - 1):
+        initial_position = chunk_boundaries[idx]
+        file.seek(initial_position)
         while True:
-            mini_chunk = file.read(mini_chunk_size)  # Read a mini chunk
-
-            # If EOF, this boundary should be at the end of the file
+            mini_chunk = file.read(mini_chunk_size)
             if mini_chunk == b"":
-                chunk_boundaries[bi] = file_size
+                chunk_boundaries[idx] = file_size
                 break
 
-            # Find the special token in the mini chunk
             found_at = mini_chunk.find(split_special_token)
             if found_at != -1:
-                chunk_boundaries[bi] = initial_position + found_at
+                chunk_boundaries[idx] = initial_position + found_at
                 break
             initial_position += mini_chunk_size
 
-    # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
     return sorted(set(chunk_boundaries))
 
 
-def _process_chunk_for_pretokenization(args: tuple[str, list[str], str]) -> Counter[bytes]:
-    """
-    Process a single chunk of text for pre-tokenization.
-    This function is designed to be called in parallel by multiprocessing.
+def train_bpe(
+    input_path: str | os.PathLike[str],
+    vocab_size: int = 270,
+    special_tokens: Sequence[str] | None = None,
+    num_workers: int | None = None,
+    pattern: str = PATTERN,
+) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+    """Train a simple BPE vocabulary from the provided text file.
 
     Args:
-        args: Tuple of (chunk_text, special_tokens, pattern)
+        input_path: Path to the training corpus (UTF-8 encoded).
+        vocab_size: Target vocabulary size including the base 256 byte tokens.
+        special_tokens: Optional additional tokens reserved at the beginning of
+            the vocabulary.
+        num_workers: Optional worker count for multiprocessing.  Defaults to
+            the CPU count, but never exceeds the number of chunks available.
+        pattern: Regular expression used for pre-tokenisation.
 
     Returns:
-        Counter of pre-tokens found in this chunk
+        A tuple ``(vocab, merges)`` where:
+            * ``vocab`` maps token indices to their byte representations.
+            * ``merges`` captures the ordered sequence of byte pair merges.
     """
-    chunk, special_tokens, pattern = args
+    resolved_special_tokens = _normalise_special_tokens(special_tokens)
 
-    pre_tokens_cnt: Counter[bytes] = Counter()
-    special_split_re = re.compile("|".join(re.escape(t) for t in special_tokens)) if special_tokens else None
-    pat_re = re.compile(pattern)
+    with open(input_path, "rb") as file:
+        boundaries = find_chunk_boundaries(file, _effective_worker_count(num_workers), ENDOFTEXT_BYTES)
+        chunks = _read_chunks(file, boundaries)
 
-    segments = special_split_re.split(chunk) if special_split_re else [chunk]
-    for seg in segments:
-        if not seg:
-            continue
-        pre_tokens_cnt.update(m.group(0).encode("utf-8") for m in pat_re.finditer(seg))
+    worker_count = _effective_worker_count(num_workers, len(chunks))
+    pre_token_counts = _collect_pre_token_counts(chunks, resolved_special_tokens, pattern, worker_count)
 
-    return pre_tokens_cnt
+    vocab_list = _build_initial_vocab(resolved_special_tokens)
+    pair_counts, token_splits = _initialise_pair_counts(pre_token_counts)
 
-
-def train_bpe(
-    input_path: str | os.PathLike,
-    vocab_size: int = 270,
-    special_tokens: list[str] = [ENDOFTEXT],
-) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-    vocab: dict[int, bytes] = {}
     merges: list[tuple[bytes, bytes]] = []
+    while len(vocab_list) < vocab_size:
+        pair_to_merge = _select_most_frequent_pair(pair_counts)
+        if pair_to_merge is None:
+            break
+        new_token = _apply_merge(pair_to_merge, pre_token_counts, token_splits, pair_counts)
+        merges.append(pair_to_merge)
+        vocab_list.append(new_token)
 
-    pre_tokens_cnt: Counter[bytes] = Counter()
-    vocab_lst = _build_init_vocab_lst(special_tokens)
-
-    with open(input_path, "rb") as f:
-        num_processes = 4
-        boundaries = find_chunk_boundaries(f, num_processes, ENDOFTEXT_BYTES)
-
-        chunks = []
-        for start, end in zip(boundaries[:-1], boundaries[1:]):
-            f.seek(start)
-            chunk = f.read(end - start).decode("utf-8", errors="ignore")
-            chunks.append(chunk)
-
-    chunk_args = [(chunk, special_tokens, PAT) for chunk in chunks]
-    with Pool(processes=num_processes) as pool:
-        counters = pool.map(_process_chunk_for_pretokenization, chunk_args)
-    for counter in counters:
-        pre_tokens_cnt.update(counter)
-
-    token_pair_cnt, pre_spilt_tokens = _init_pair_cnt(pre_tokens_cnt)
-
-    while len(vocab_lst) < vocab_size:
-        pair_merge = max(token_pair_cnt, key=lambda pair: (token_pair_cnt[pair], pair))
-        for pre_token, split_token_lst in pre_spilt_tokens.items():
-            freq = pre_tokens_cnt[pre_token]
-            merge_token1 = pair_merge[0]
-            merge_token2 = pair_merge[1]
-            new_token = pair_merge[0] + pair_merge[1]
-            if new_token not in pre_token:
-                continue
-            else:
-                i = 0
-                while i < len(split_token_lst) - 1:
-                    if split_token_lst[i] == merge_token1 and split_token_lst[i + 1] == merge_token2:
-                        if i > 0:
-                            token_pair_cnt[(split_token_lst[i - 1], split_token_lst[i])] -= freq
-                            token_pair_cnt[(split_token_lst[i - 1], new_token)] += freq
-                        if i + 2 < len(split_token_lst):
-                            token_pair_cnt[(split_token_lst[i + 1], split_token_lst[i + 2])] -= freq
-                            token_pair_cnt[(new_token, split_token_lst[i + 2])] += freq
-                        split_token_lst[i : i + 2] = [new_token]
-                        # not increase i, check new merged
-                    else:
-                        i += 1
-        token_pair_cnt[(pair_merge[0], pair_merge[1])] = 0
-        merges.append(pair_merge)
-        vocab_lst.append(new_token)
-
-    for idx, token_bytes in enumerate(vocab_lst):
-        vocab[idx] = token_bytes
-    print(merges)
+    vocab = {idx: token for idx, token in enumerate(vocab_list)}
     return vocab, merges
 
 
-def _build_init_vocab_lst(special_tokens: list[str]) -> list[bytes]:
-    vocab_lst = []
-    for token in special_tokens:
-        vocab_lst.append(token.encode("utf-8"))
-    for i in range(256):
-        vocab_lst.append(bytes([i]))
-    return vocab_lst
+def _normalise_special_tokens(tokens: Sequence[str] | None) -> list[str]:
+    """Return a de-duplicated, ordered list of special tokens."""
+
+    if not tokens:
+        return [ENDOFTEXT]
+
+    seen: set[str] = set()
+    normalised: list[str] = []
+    for token in tokens:
+        if token not in seen:
+            normalised.append(token)
+            seen.add(token)
+    return normalised
 
 
-def _init_pair_cnt(pre_tokens_cnt: Counter[bytes]) -> tuple[Counter[tuple[bytes, bytes]], dict[bytes, list[bytes]]]:
-    cnt: Counter[tuple[bytes, bytes]] = Counter()
-    pre_split_tokens: dict[bytes, list[bytes]] = {}
-    for token_byte, freq in pre_tokens_cnt.items():
-        split_bytes = [bytes([i]) for i in token_byte]
-        for i in range(len(token_byte) - 1):
-            pair = (bytes([token_byte[i]]), bytes([token_byte[i + 1]]))
-            cnt[pair] += freq
-            pre_split_tokens[token_byte] = split_bytes
-    return cnt, pre_split_tokens
+def _effective_worker_count(num_workers: int | None, num_chunks: int | None = None) -> int:
+    """Pick a worker count that respects CPU availability and chunk count."""
+    available = cpu_count() or 1
+    requested = num_workers or available
+    capped = min(requested, available)
+    if num_chunks is not None:
+        capped = min(capped, max(1, num_chunks))
+    return max(1, capped)
+
+
+def _read_chunks(file: BinaryIO, boundaries: Sequence[int]) -> list[str]:
+    """Read UTF-8 segments from ``file`` based on byte ``boundaries``."""
+    chunks: list[str] = []
+    for start, end in zip(boundaries[:-1], boundaries[1:]):
+        file.seek(start)
+        chunk = file.read(end - start).decode("utf-8", errors="ignore")
+        if chunk:
+            chunks.append(chunk)
+    return chunks
+
+
+def _collect_pre_token_counts(
+    chunks: Sequence[str],
+    special_tokens: Sequence[str],
+    pattern: str,
+    worker_count: int,
+) -> Counter[bytes]:
+    """Pre-tokenise the corpus in parallel and aggregate byte token counts."""
+    if not chunks:
+        return Counter()
+
+    args = [(chunk, list(special_tokens), pattern) for chunk in chunks]
+    if worker_count == 1:
+        counters = map(_process_chunk_for_pretokenization, args)
+    else:
+        with Pool(processes=worker_count) as pool:
+            counters = pool.map(_process_chunk_for_pretokenization, args)
+
+    aggregated: Counter[bytes] = Counter()
+    for counter in counters:
+        aggregated.update(counter)
+    return aggregated
+
+
+def _process_chunk_for_pretokenization(args: tuple[str, list[str], str]) -> Counter[bytes]:
+    """Tokenise a chunk into byte strings following the given pattern."""
+    chunk, special_tokens, pattern = args
+
+    pre_tokens: Counter[bytes] = Counter()
+    special_split_re = re.compile("|".join(re.escape(token) for token in special_tokens)) if special_tokens else None
+    pat_re = re.compile(pattern)
+
+    segments = special_split_re.split(chunk) if special_split_re else [chunk]
+    for segment in segments:
+        if not segment:
+            continue
+        pre_tokens.update(match.group(0).encode("utf-8") for match in pat_re.finditer(segment))
+
+    return pre_tokens
+
+
+def _build_initial_vocab(special_tokens: Iterable[str]) -> list[bytes]:
+    """Construct the starting vocabulary of special tokens plus single bytes."""
+    vocab_list = [token.encode("utf-8") for token in special_tokens]
+    vocab_list.extend(bytes([byte]) for byte in range(256))
+    return vocab_list
+
+
+def _initialise_pair_counts(
+    pre_token_counts: Counter[bytes],
+) -> tuple[Counter[tuple[bytes, bytes]], dict[bytes, list[bytes]]]:
+    """Initialise pair statistics used by the merge loop."""
+    pair_counts: Counter[tuple[bytes, bytes]] = Counter()
+    token_splits: dict[bytes, list[bytes]] = {}
+
+    for token_bytes, frequency in pre_token_counts.items():
+        split_bytes = [bytes([byte]) for byte in token_bytes]
+        token_splits[token_bytes] = split_bytes
+        for idx in range(len(split_bytes) - 1):
+            pair = (split_bytes[idx], split_bytes[idx + 1])
+            pair_counts[pair] += frequency
+
+    return pair_counts, token_splits
+
+
+def _select_most_frequent_pair(
+    pair_counts: Counter[tuple[bytes, bytes]],
+) -> tuple[bytes, bytes] | None:
+    """Return the most frequent pair, or ``None`` if no positive counts remain."""
+    positive_pairs = [(pair, count) for pair, count in pair_counts.items() if count > 0]
+    if not positive_pairs:
+        return None
+
+    # Match legacy behaviour: prefer lexicographically larger pairs on ties.
+    pair, _ = max(positive_pairs, key=lambda item: (item[1], item[0]))
+    return pair
+
+
+def _apply_merge(
+    pair: tuple[bytes, bytes],
+    pre_token_counts: Counter[bytes],
+    token_splits: dict[bytes, list[bytes]],
+    pair_counts: Counter[tuple[bytes, bytes]],
+) -> bytes:
+    """Apply a merge to all token splits and update neighbouring pair counts."""
+    merge_a, merge_b = pair
+    new_token = merge_a + merge_b
+
+    for original_token, split_tokens in token_splits.items():
+        frequency = pre_token_counts[original_token]
+        if frequency == 0 or new_token not in original_token:
+            continue
+
+        idx = 0
+        while idx < len(split_tokens) - 1:
+            if split_tokens[idx] == merge_a and split_tokens[idx + 1] == merge_b:
+                if idx > 0:
+                    old_prev_pair = (split_tokens[idx - 1], split_tokens[idx])
+                    pair_counts[old_prev_pair] -= frequency
+                    new_prev_pair = (split_tokens[idx - 1], new_token)
+                    pair_counts[new_prev_pair] += frequency
+                if idx + 2 < len(split_tokens):
+                    old_next_pair = (split_tokens[idx + 1], split_tokens[idx + 2])
+                    pair_counts[old_next_pair] -= frequency
+                    new_next_pair = (new_token, split_tokens[idx + 2])
+                    pair_counts[new_next_pair] += frequency
+
+                split_tokens[idx : idx + 2] = [new_token]
+            else:
+                idx += 1
+
+    pair_counts[pair] = 0
+    return new_token
 
 
 if __name__ == "__main__":
