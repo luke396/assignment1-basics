@@ -14,6 +14,9 @@ PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S
 ENDOFTEXT: str = "<|endoftext|>"
 ENDOFTEXT_BYTES: bytes = ENDOFTEXT.encode("utf-8")
 
+_COMPILED_PATTERNS: dict[str, re.Pattern] = {}
+_COMPILED_SPECIAL_SPLITS: dict[tuple[str, tuple[str, ...]], re.Pattern] = {}
+
 
 def find_chunk_boundaries(
     file: BinaryIO,
@@ -88,10 +91,14 @@ def train_bpe(
 
     with open(input_path, "rb") as file:
         boundaries = find_chunk_boundaries(file, _effective_worker_count(num_workers), ENDOFTEXT_BYTES)
-        chunks = _read_chunks(file, boundaries)
 
-    worker_count = _effective_worker_count(num_workers, len(chunks))
-    pre_token_counts = _collect_pre_token_counts(chunks, resolved_special_tokens, pattern, worker_count)
+    ranges: list[tuple[int, int]] = list(zip(boundaries[:-1], boundaries[1:]))
+    worker_count = _effective_worker_count(num_workers, len(ranges))
+
+    # Always use multiprocessing and have workers read their own file ranges.
+    pre_token_counts = _collect_pre_token_counts_from_ranges(
+        str(input_path), ranges, resolved_special_tokens, pattern, worker_count
+    )
 
     vocab_list = _build_initial_vocab(resolved_special_tokens)
     pair_counts, token_splits = _initialise_pair_counts(pre_token_counts)
@@ -106,6 +113,7 @@ def train_bpe(
         vocab_list.append(new_token)
 
     vocab = {idx: token for idx, token in enumerate(vocab_list)}
+
     return vocab, merges
 
 
@@ -134,33 +142,43 @@ def _effective_worker_count(num_workers: int | None, num_chunks: int | None = No
     return max(1, capped)
 
 
-def _read_chunks(file: BinaryIO, boundaries: Sequence[int]) -> list[str]:
-    """Read UTF-8 segments from ``file`` based on byte ``boundaries``."""
-    chunks: list[str] = []
-    for start, end in zip(boundaries[:-1], boundaries[1:]):
-        file.seek(start)
-        chunk = file.read(end - start).decode("utf-8", errors="ignore")
-        if chunk:
-            chunks.append(chunk)
-    return chunks
+def _get_compiled_pattern(pattern: str) -> re.Pattern:
+    pat = _COMPILED_PATTERNS.get(pattern)
+    if pat is None:
+        pat = re.compile(pattern)
+        _COMPILED_PATTERNS[pattern] = pat
+    return pat
 
 
-def _collect_pre_token_counts(
-    chunks: Sequence[str],
+def _get_compiled_special_split(special_tokens: Sequence[str]) -> re.Pattern | None:
+    if not special_tokens:
+        return None
+    key = ("|".join(re.escape(token) for token in special_tokens), tuple(special_tokens))
+    pat = _COMPILED_SPECIAL_SPLITS.get(key)
+    if pat is None:
+        pat = re.compile(key[0])
+        _COMPILED_SPECIAL_SPLITS[key] = pat
+    return pat
+
+
+def _collect_pre_token_counts_from_ranges(
+    input_path: str,
+    ranges: Sequence[tuple[int, int]],
     special_tokens: Sequence[str],
     pattern: str,
     worker_count: int,
 ) -> Counter[bytes]:
-    """Pre-tokenise the corpus in parallel and aggregate byte token counts."""
-    if not chunks:
+    """Pre-tokenise by reading file slices in workers to avoid sending large strings.
+
+    Each task receives only offsets and small metadata, dramatically reducing
+    pickling and IPC overhead compared to sending whole chunk strings.
+    """
+    if not ranges:
         return Counter()
 
-    args = [(chunk, list(special_tokens), pattern) for chunk in chunks]
-    if worker_count == 1:
-        counters = map(_process_chunk_for_pretokenization, args)
-    else:
-        with Pool(processes=worker_count) as pool:
-            counters = pool.map(_process_chunk_for_pretokenization, args)
+    args = [(input_path, start, end, list(special_tokens), pattern) for (start, end) in ranges]
+    with Pool(processes=worker_count) as pool:
+        counters = pool.map(_process_range_for_pretokenization, args)
 
     aggregated: Counter[bytes] = Counter()
     for counter in counters:
@@ -168,20 +186,22 @@ def _collect_pre_token_counts(
     return aggregated
 
 
-def _process_chunk_for_pretokenization(args: tuple[str, list[str], str]) -> Counter[bytes]:
-    """Tokenise a chunk into byte strings following the given pattern."""
-    chunk, special_tokens, pattern = args
+def _process_range_for_pretokenization(args: tuple[str, int, int, list[str], str]) -> Counter[bytes]:
+    """Worker: open file, read [start:end], and tokenise like chunk path."""
+    path, start, end, special_tokens, pattern = args
+    with open(path, "rb") as f:
+        f.seek(start)
+        data = f.read(end - start).decode("utf-8", errors="ignore")
 
     pre_tokens: Counter[bytes] = Counter()
-    special_split_re = re.compile("|".join(re.escape(token) for token in special_tokens)) if special_tokens else None
-    pat_re = re.compile(pattern)
+    special_split_re = _get_compiled_special_split(special_tokens)
+    pat_re = _get_compiled_pattern(pattern)
 
-    segments = special_split_re.split(chunk) if special_split_re else [chunk]
+    segments = special_split_re.split(data) if special_split_re else [data]
     for segment in segments:
         if not segment:
             continue
-        pre_tokens.update(match.group(0).encode("utf-8") for match in pat_re.finditer(segment))
-
+        pre_tokens.update(m.group(0).encode("utf-8") for m in pat_re.finditer(segment))
     return pre_tokens
 
 
@@ -260,4 +280,7 @@ def _apply_merge(
 
 
 if __name__ == "__main__":
-    train_bpe(input_path="data/TinyStoriesV2-GPT4-valid.txt")
+    # test
+    # train_bpe(input_path="data/TinyStoriesV2-GPT4-valid.txt")
+    # train
+    train_bpe(input_path="data/TinyStoriesV2-GPT4-train.txt", vocab_size=1000)
