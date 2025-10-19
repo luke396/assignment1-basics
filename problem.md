@@ -45,3 +45,37 @@ Traceback (most recent call last):
 UnicodeDecodeError: 'utf-8' codec can't decode bytes in position 0-1: unexpected end of data
 >>> bytes([228, 189, 160]).decode('utf-8')
 ```
+
+## train_bpe
+
+[train_bpe](cs336_basics/bpe.py)
+
+## train_bpe_tinystories
+
+(a)
+
+Training our bpe model on TinyStories dataset with vocab size 1000, will cost amlost 2 mintues. Reading the result, the longest tokens below, and they are totally make sense.
+
+```shell
+Top 5 longest tokens (by bytes):
+  1) id=0, len=13 bytes, value=b'<|endoftext|>' (hex=3c7c656e646f66746578747c3e)
+  2) id=914, len=11 bytes, value=b' unexpected' (hex=20756e6578706563746564)
+  3) id=577, len=10 bytes, value=b' something' (hex=20736f6d657468696e67)
+  4) id=896, len=10 bytes, value=b' surprised' (hex=20737572707269736564)
+  5) id=995, len=10 bytes, value=b' beautiful' (hex=2062656175746966756c)
+```
+
+(b)
+
+```shell
+uv run py-spy record -o bpe_profile.svg -- python cs336_basics/bpe.py
+```
+
+[`bpe_profile.svg](bpe_profile.svg)
+
+We get the fire graph , and we can see that the most time consuming part is `_apply_merge` function, which is updating token count using increase method.
+
+Before this, the most time comsuming part is file transfer in multiprocessing, which we can optimize by transferring the `start` and `end` index instead of the whole text chunk.
+
+## train_bpe_expts_owt
+

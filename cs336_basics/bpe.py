@@ -6,9 +6,11 @@ import os
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from multiprocessing import Pool, cpu_count
+from pathlib import Path
 from typing import BinaryIO
 
 import regex as re
+from utility import load_bpe_msgpack, save_bpe_msgpack
 
 PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 ENDOFTEXT: str = "<|endoftext|>"
@@ -70,6 +72,7 @@ def train_bpe(
     special_tokens: Sequence[str] | None = None,
     num_workers: int | None = None,
     pattern: str = PATTERN,
+    save: bool = False,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """Train a simple BPE vocabulary from the provided text file.
 
@@ -81,6 +84,7 @@ def train_bpe(
         num_workers: Optional worker count for multiprocessing.  Defaults to
             the CPU count, but never exceeds the number of chunks available.
         pattern: Regular expression used for pre-tokenisation.
+        save: Save resulte. Defaults False.
 
     Returns:
         A tuple ``(vocab, merges)`` where:
@@ -113,6 +117,11 @@ def train_bpe(
         vocab_list.append(new_token)
 
     vocab = {idx: token for idx, token in enumerate(vocab_list)}
+
+    if save:
+        base_path = Path(input_path)
+        out_path = base_path.parent / "tokenizer.msgpack.gz"
+        save_bpe_msgpack(vocab, merges, out_path)
 
     return vocab, merges
 
@@ -280,7 +289,11 @@ def _apply_merge(
 
 
 if __name__ == "__main__":
-    # test
+    # test/debug
     # train_bpe(input_path="data/TinyStoriesV2-GPT4-valid.txt")
+
     # train
-    train_bpe(input_path="data/TinyStoriesV2-GPT4-train.txt", vocab_size=1000)
+    train_bpe(input_path="data/TinyStoriesV2-GPT4-train.txt", vocab_size=1000, save=True)
+    voacb, merge = load_bpe_msgpack(Path("data/tokenizer.msgpack.gz"))
+    print("\nvocab:", voacb)
+    print("\nmerge:", merge)
