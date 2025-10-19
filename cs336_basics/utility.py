@@ -13,6 +13,20 @@ def _format_bytes(b: bytes) -> str:
         return repr(b)
 
 
+def print_bpe_result(
+    output_path: Path | None = None, bpe_result: tuple[dict[int, bytes], list[tuple[bytes, bytes]]] | None = None
+):
+    if output_path:
+        vocab, merge = load_bpe_msgpack(output_path)
+    elif bpe_result:
+        vocab, merge = bpe_result
+    else:
+        raise (ValueError("Nothing to print."))
+
+    print_vocab_sample(vocab)
+    print_merges_sample(merge)
+
+
 def print_vocab_sample(vocab: dict[int, bytes], limit: int = 20) -> None:
     keys = sorted(vocab.keys())
     limit = max(0, int(limit))

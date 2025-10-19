@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import os
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
+from functools import partial
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import BinaryIO
 
 import regex as re
-from utility import load_bpe_msgpack, save_bpe_msgpack
+
+from .utility import print_bpe_result, save_bpe_msgpack
 
 PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 ENDOFTEXT: str = "<|endoftext|>"
@@ -18,6 +20,7 @@ ENDOFTEXT_BYTES: bytes = ENDOFTEXT.encode("utf-8")
 
 _COMPILED_PATTERNS: dict[str, re.Pattern] = {}
 _COMPILED_SPECIAL_SPLITS: dict[tuple[str, tuple[str, ...]], re.Pattern] = {}
+WORKER_RE_PATTERN = {}
 
 
 def find_chunk_boundaries(
@@ -95,28 +98,31 @@ def train_bpe(
 
     with open(input_path, "rb") as file:
         boundaries = find_chunk_boundaries(file, _effective_worker_count(num_workers), ENDOFTEXT_BYTES)
-
-    ranges: list[tuple[int, int]] = list(zip(boundaries[:-1], boundaries[1:]))
-    worker_count = _effective_worker_count(num_workers, len(ranges))
-
-    # Always use multiprocessing and have workers read their own file ranges.
+    ranges: Iterable[tuple[int, int]] = ((start, end) for start, end in zip(boundaries[:-1], boundaries[1:]))
+    ranges_len = len(boundaries) - 1
+    worker_count = _effective_worker_count(num_workers, ranges_len)
     pre_token_counts = _collect_pre_token_counts_from_ranges(
-        str(input_path), ranges, resolved_special_tokens, pattern, worker_count
+        str(input_path), ranges, ranges_len, resolved_special_tokens, pattern, worker_count
     )
 
     vocab_list = _build_initial_vocab(resolved_special_tokens)
-    pair_counts, token_splits = _initialise_pair_counts(pre_token_counts)
+    pair_counts, token_splits, pair_to_tokens = _initialise_pair_counts(
+        pre_token_counts, symbol_offset=len(resolved_special_tokens)
+    )
 
-    merges: list[tuple[bytes, bytes]] = []
+    merges_id: list[tuple[int, int]] = []
     while len(vocab_list) < vocab_size:
-        pair_to_merge = _select_most_frequent_pair(pair_counts)
+        pair_to_merge = _select_most_frequent_pair(pair_counts, vocab_list)
         if pair_to_merge is None:
             break
-        new_token = _apply_merge(pair_to_merge, pre_token_counts, token_splits, pair_counts)
-        merges.append(pair_to_merge)
+        new_token_id = len(vocab_list)
+        new_token = vocab_list[pair_to_merge[0]] + vocab_list[pair_to_merge[1]]
         vocab_list.append(new_token)
+        _apply_merge(new_token_id, pair_to_merge, pair_to_tokens, pre_token_counts, token_splits, pair_counts)
+        merges_id.append(pair_to_merge)
 
     vocab = {idx: token for idx, token in enumerate(vocab_list)}
+    merges = [(vocab_list[i], vocab_list[j]) for i, j in merges_id]
 
     if save:
         base_path = Path(input_path)
@@ -143,7 +149,7 @@ def _normalise_special_tokens(tokens: Sequence[str] | None) -> list[str]:
 
 def _effective_worker_count(num_workers: int | None, num_chunks: int | None = None) -> int:
     """Pick a worker count that respects CPU availability and chunk count."""
-    available = cpu_count() or 1
+    available = cpu_count() - 1 or 1
     requested = num_workers or available
     capped = min(requested, available)
     if num_chunks is not None:
@@ -172,10 +178,12 @@ def _get_compiled_special_split(special_tokens: Sequence[str]) -> re.Pattern | N
 
 def _collect_pre_token_counts_from_ranges(
     input_path: str,
-    ranges: Sequence[tuple[int, int]],
+    ranges: Iterable[tuple[int, int]],
+    ranges_len: int,
     special_tokens: Sequence[str],
     pattern: str,
     worker_count: int,
+    chunksize: int | None = None,
 ) -> Counter[bytes]:
     """Pre-tokenise by reading file slices in workers to avoid sending large strings.
 
@@ -185,26 +193,46 @@ def _collect_pre_token_counts_from_ranges(
     if not ranges:
         return Counter()
 
-    args = [(input_path, start, end, list(special_tokens), pattern) for (start, end) in ranges]
-    with Pool(processes=worker_count) as pool:
-        counters = pool.map(_process_range_for_pretokenization, args)
+    worker_func = partial(_process_range_for_pretokenization, input_path)
+    if chunksize is None:
+        base = max(1, ranges_len // (worker_count * 8))
+        chunksize = min(256, max(4, base))
 
     aggregated: Counter[bytes] = Counter()
-    for counter in counters:
-        aggregated.update(counter)
+    with Pool(
+        processes=worker_count,
+        initializer=_init_worker,
+        initargs=(tuple(special_tokens), pattern),
+    ) as pool:
+        for counter in pool.imap_unordered(worker_func, ranges, chunksize=chunksize):
+            aggregated.update(counter)
     return aggregated
 
 
-def _process_range_for_pretokenization(args: tuple[str, int, int, list[str], str]) -> Counter[bytes]:
+def _init_worker(special_tokens, pattern):
+    global WORKER_RE_PATTERN
+    special_split_re = _get_compiled_special_split(special_tokens)
+    pat_re = _get_compiled_pattern(pattern)
+    WORKER_RE_PATTERN["special"] = special_split_re
+    WORKER_RE_PATTERN["pattern"] = pat_re
+
+
+def _process_range_for_pretokenization(
+    path: str,
+    range: tuple[
+        int,
+        int,
+    ],
+) -> Counter[bytes]:
     """Worker: open file, read [start:end], and tokenise like chunk path."""
-    path, start, end, special_tokens, pattern = args
+    (start, end) = range
     with open(path, "rb") as f:
         f.seek(start)
         data = f.read(end - start).decode("utf-8", errors="ignore")
 
     pre_tokens: Counter[bytes] = Counter()
-    special_split_re = _get_compiled_special_split(special_tokens)
-    pat_re = _get_compiled_pattern(pattern)
+    special_split_re = WORKER_RE_PATTERN["special"]
+    pat_re = WORKER_RE_PATTERN["pattern"]
 
     segments = special_split_re.split(data) if special_split_re else [data]
     for segment in segments:
@@ -223,69 +251,86 @@ def _build_initial_vocab(special_tokens: Iterable[str]) -> list[bytes]:
 
 def _initialise_pair_counts(
     pre_token_counts: Counter[bytes],
-) -> tuple[Counter[tuple[bytes, bytes]], dict[bytes, list[bytes]]]:
+    symbol_offset: int,
+) -> tuple[Counter[tuple[int, int]], dict[bytes, list[int]], dict[tuple[int, int], set[bytes]]]:
     """Initialise pair statistics used by the merge loop."""
-    pair_counts: Counter[tuple[bytes, bytes]] = Counter()
-    token_splits: dict[bytes, list[bytes]] = {}
+    pair_counts: Counter[tuple[int, int]] = Counter()
+    token_splits: dict[bytes, list[int]] = {}
+    pair_to_tokens: dict[tuple[int, int], set[bytes]] = defaultdict(set)
 
     for token_bytes, frequency in pre_token_counts.items():
-        split_bytes = [bytes([byte]) for byte in token_bytes]
-        token_splits[token_bytes] = split_bytes
-        for idx in range(len(split_bytes) - 1):
-            pair = (split_bytes[idx], split_bytes[idx + 1])
+        split_int = [b + symbol_offset for b in token_bytes]
+        token_splits[token_bytes] = split_int
+        for idx in range(len(split_int) - 1):
+            pair = (split_int[idx], split_int[idx + 1])
             pair_counts[pair] += frequency
+            pair_to_tokens[pair].add(token_bytes)
 
-    return pair_counts, token_splits
+    return pair_counts, token_splits, pair_to_tokens
 
 
 def _select_most_frequent_pair(
-    pair_counts: Counter[tuple[bytes, bytes]],
-) -> tuple[bytes, bytes] | None:
+    pair_counts: Counter[tuple[int, int]],
+    vocab_list: list[bytes],
+) -> tuple[int, int] | None:
     """Return the most frequent pair, or ``None`` if no positive counts remain."""
     positive_pairs = [(pair, count) for pair, count in pair_counts.items() if count > 0]
     if not positive_pairs:
         return None
 
-    # Match legacy behaviour: prefer lexicographically larger pairs on ties.
-    pair, _ = max(positive_pairs, key=lambda item: (item[1], item[0]))
+    # Match legacy behaviour: prefer lexicographically larger pairs on ties based on bytes.
+    # We compare by (count, bytes_a, bytes_b).
+    def _key(item: tuple[tuple[int, int], int]):
+        (a, b), cnt = item
+        return (cnt, vocab_list[a], vocab_list[b])
+
+    pair, _ = max(positive_pairs, key=_key)
     return pair
 
 
 def _apply_merge(
-    pair: tuple[bytes, bytes],
+    new_token_id: int,
+    pair: tuple[int, int],
+    pair_to_token: dict[tuple[int, int], set[bytes]],
     pre_token_counts: Counter[bytes],
-    token_splits: dict[bytes, list[bytes]],
-    pair_counts: Counter[tuple[bytes, bytes]],
-) -> bytes:
+    token_splits: dict[bytes, list[int]],
+    pair_counts: Counter[tuple[int, int]],
+):
     """Apply a merge to all token splits and update neighbouring pair counts."""
-    merge_a, merge_b = pair
-    new_token = merge_a + merge_b
-
-    for original_token, split_tokens in token_splits.items():
-        frequency = pre_token_counts[original_token]
-        if frequency == 0 or new_token not in original_token:
-            continue
-
-        idx = 0
-        while idx < len(split_tokens) - 1:
-            if split_tokens[idx] == merge_a and split_tokens[idx + 1] == merge_b:
-                if idx > 0:
-                    old_prev_pair = (split_tokens[idx - 1], split_tokens[idx])
-                    pair_counts[old_prev_pair] -= frequency
-                    new_prev_pair = (split_tokens[idx - 1], new_token)
-                    pair_counts[new_prev_pair] += frequency
-                if idx + 2 < len(split_tokens):
-                    old_next_pair = (split_tokens[idx + 1], split_tokens[idx + 2])
-                    pair_counts[old_next_pair] -= frequency
-                    new_next_pair = (new_token, split_tokens[idx + 2])
-                    pair_counts[new_next_pair] += frequency
-
-                split_tokens[idx : idx + 2] = [new_token]
+    tokens = pair_to_token[pair]
+    a, b = pair
+    changed_cnt = Counter()  # collect and sum in one time
+    for token in list(tokens):
+        split = token_splits[token]
+        freq = pre_token_counts[token]
+        new_split = []
+        i = 0
+        n = len(split)
+        while i < n:
+            if i + 1 < n and split[i] == a and split[i + 1] == b:
+                prev = split[i - 1] if i > 0 else None
+                nxt = split[i + 2] if i + 2 < n else None
+                if prev is not None:
+                    changed_cnt[(prev, a)] -= freq
+                    changed_cnt[(prev, new_token_id)] += freq
+                if nxt is not None:
+                    changed_cnt[(b, nxt)] -= freq
+                    changed_cnt[(new_token_id, nxt)] += freq
+                new_split.append(new_token_id)
+                i += 2
             else:
-                idx += 1
+                new_split.append(split[i])
+                i += 1
+        old_pairs = {(split[i], split[i + 1]) for i in range(len(split) - 1)}
+        new_pairs = {(new_split[j], new_split[j + 1]) for j in range(len(new_split) - 1)}
+        for p in new_pairs - old_pairs:
+            pair_to_token[p].add(token)
+        for p in old_pairs - new_pairs:
+            pair_to_token[p].discard(token)
+        token_splits[token] = new_split
 
+    pair_counts.update(changed_cnt)
     pair_counts[pair] = 0
-    return new_token
 
 
 if __name__ == "__main__":
@@ -293,7 +338,5 @@ if __name__ == "__main__":
     # train_bpe(input_path="data/TinyStoriesV2-GPT4-valid.txt")
 
     # train
-    train_bpe(input_path="data/TinyStoriesV2-GPT4-train.txt", vocab_size=1000, save=True)
-    voacb, merge = load_bpe_msgpack(Path("data/tokenizer.msgpack.gz"))
-    print("\nvocab:", voacb)
-    print("\nmerge:", merge)
+    bpe_result = train_bpe(input_path="data/TinyStoriesV2-GPT4-train.txt", vocab_size=1000, save=False)
+    print_bpe_result(bpe_result=bpe_result)
