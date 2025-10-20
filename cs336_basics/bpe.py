@@ -6,6 +6,7 @@ import os
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from functools import partial
+from heapq import heappop, heappush
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import BinaryIO
@@ -106,19 +107,34 @@ def train_bpe(
     )
 
     vocab_list = _build_initial_vocab(resolved_special_tokens)
-    pair_counts, token_splits, pair_to_tokens = _initialise_pair_counts(
-        pre_token_counts, symbol_offset=len(resolved_special_tokens)
+    vocab_lexkey = [tuple([255 - byte for byte in tok] + [255]) for tok in vocab_list]
+
+    pair_counts, token_splits, pair_to_tokens, pair_version = _initialise_pair_counts(
+        pre_token_counts,
+        len(resolved_special_tokens),
     )
+    pair_entry_heap: list[tuple[int, int, int, int, int, int]] = _init_pair_entry_heap(pair_counts, vocab_lexkey)
 
     merges_id: list[tuple[int, int]] = []
     while len(vocab_list) < vocab_size:
-        pair_to_merge = _select_most_frequent_pair(pair_counts, vocab_list)
+        pair_to_merge = _select_most_frequent_pair(pair_entry_heap, pair_version)
         if pair_to_merge is None:
             break
         new_token_id = len(vocab_list)
         new_token = vocab_list[pair_to_merge[0]] + vocab_list[pair_to_merge[1]]
         vocab_list.append(new_token)
-        _apply_merge(new_token_id, pair_to_merge, pair_to_tokens, pre_token_counts, token_splits, pair_counts)
+        vocab_lexkey.append(tuple([255 - b for b in new_token] + [255]))
+        _apply_merge(
+            new_token_id,
+            pair_to_merge,
+            pair_to_tokens,
+            pre_token_counts,
+            token_splits,
+            pair_counts,
+            pair_version,
+            pair_entry_heap,
+            vocab_lexkey,
+        )
         merges_id.append(pair_to_merge)
 
     vocab = {idx: token for idx, token in enumerate(vocab_list)}
@@ -250,13 +266,16 @@ def _build_initial_vocab(special_tokens: Iterable[str]) -> list[bytes]:
 
 
 def _initialise_pair_counts(
-    pre_token_counts: Counter[bytes],
-    symbol_offset: int,
-) -> tuple[Counter[tuple[int, int]], dict[bytes, list[int]], dict[tuple[int, int], set[bytes]]]:
+    pre_token_counts: Counter[bytes], symbol_offset: int
+) -> tuple[
+    Counter[tuple[int, int]], dict[bytes, list[int]], dict[tuple[int, int], set[bytes]], dict[tuple[int, int], int]
+]:
     """Initialise pair statistics used by the merge loop."""
     pair_counts: Counter[tuple[int, int]] = Counter()
     token_splits: dict[bytes, list[int]] = {}
     pair_to_tokens: dict[tuple[int, int], set[bytes]] = defaultdict(set)
+    pair_version: dict[tuple[int, int], int] = defaultdict(int)
+    init_pair_version = 0
 
     for token_bytes, frequency in pre_token_counts.items():
         split_int = [b + symbol_offset for b in token_bytes]
@@ -264,28 +283,38 @@ def _initialise_pair_counts(
         for idx in range(len(split_int) - 1):
             pair = (split_int[idx], split_int[idx + 1])
             pair_counts[pair] += frequency
+            pair_version[pair] = init_pair_version
             pair_to_tokens[pair].add(token_bytes)
 
-    return pair_counts, token_splits, pair_to_tokens
+    return pair_counts, token_splits, pair_to_tokens, pair_version
+
+
+def _init_pair_entry_heap(pair_counts, vocab_lexkey):
+    pair_entry_heap = []
+    for (a, b), freq in pair_counts.items():
+        if freq > 0:
+            entry: tuple[int, int, int, int, int, int] = (
+                -freq,
+                vocab_lexkey[a],
+                vocab_lexkey[b],
+                a,
+                b,
+                0,
+            )
+            heappush(pair_entry_heap, entry)
+    return pair_entry_heap
 
 
 def _select_most_frequent_pair(
-    pair_counts: Counter[tuple[int, int]],
-    vocab_list: list[bytes],
+    pair_entry_heap: list[tuple[int, int, int, int, int, int]],
+    pair_version: dict[tuple[int, int], int],
 ) -> tuple[int, int] | None:
     """Return the most frequent pair, or ``None`` if no positive counts remain."""
-    positive_pairs = [(pair, count) for pair, count in pair_counts.items() if count > 0]
-    if not positive_pairs:
-        return None
-
-    # Match legacy behaviour: prefer lexicographically larger pairs on ties based on bytes.
-    # We compare by (count, bytes_a, bytes_b).
-    def _key(item: tuple[tuple[int, int], int]):
-        (a, b), cnt = item
-        return (cnt, vocab_list[a], vocab_list[b])
-
-    pair, _ = max(positive_pairs, key=_key)
-    return pair
+    while pair_entry_heap:
+        negcnt, voblex_a, voblex_b, a, b, version = heappop(pair_entry_heap)
+        if negcnt < 0 and pair_version[a, b] == version:
+            return (a, b)
+    return None
 
 
 def _apply_merge(
@@ -295,6 +324,9 @@ def _apply_merge(
     pre_token_counts: Counter[bytes],
     token_splits: dict[bytes, list[int]],
     pair_counts: Counter[tuple[int, int]],
+    pair_version: dict[tuple[int, int], int],
+    pair_entry_heap: list[tuple[int, int, int, int, int, int]],
+    vocab_lexkey: list[tuple[int, ...]],
 ):
     """Apply a merge to all token splits and update neighbouring pair counts."""
     tokens = pair_to_token[pair]
@@ -332,11 +364,28 @@ def _apply_merge(
     pair_counts.update(changed_cnt)
     pair_counts[pair] = 0
 
+    for (a, b), _ in changed_cnt.items():
+        freq = pair_counts[(a, b)]
+        pair_version[a, b] += 1  # freq <= 0, igore and not push to heap
+        if freq > 0:
+            heappush(
+                pair_entry_heap,
+                (
+                    -freq,
+                    vocab_lexkey[a],
+                    vocab_lexkey[b],
+                    a,
+                    b,
+                    pair_version[a, b],
+                ),
+            )
+    pair_version[pair[0], pair[1]] += 1
+
 
 if __name__ == "__main__":
     # test/debug
     # train_bpe(input_path="data/TinyStoriesV2-GPT4-valid.txt")
 
     # train
-    bpe_result = train_bpe(input_path="data/TinyStoriesV2-GPT4-train.txt", vocab_size=1000, save=False)
+    bpe_result = train_bpe(input_path="data/TinyStoriesV2-GPT4-train.txt", vocab_size=10000, save=False)
     print_bpe_result(bpe_result=bpe_result)
