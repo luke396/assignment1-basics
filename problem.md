@@ -78,4 +78,3 @@ We get the fire graph , and we can see that the most time consuming part is `_ap
 Before this, the most time comsuming part is file transfer in multiprocessing, which we can optimize by transferring the `start` and `end` index instead of the whole text chunk.
 
 ## train_bpe_expts_owt
-

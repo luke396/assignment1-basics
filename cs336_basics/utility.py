@@ -14,7 +14,8 @@ def _format_bytes(b: bytes) -> str:
 
 
 def print_bpe_result(
-    output_path: Path | None = None, bpe_result: tuple[dict[int, bytes], list[tuple[bytes, bytes]]] | None = None
+    output_path: Path | None = None,
+    bpe_result: tuple[dict[int, bytes], list[tuple[bytes, bytes]]] | None = None,
 ):
     if output_path:
         vocab, merge = load_bpe_msgpack(output_path)
@@ -40,7 +41,9 @@ def print_vocab_sample(vocab: dict[int, bytes], limit: int = 20) -> None:
         longest_items = sorted(vocab.items(), key=lambda kv: (-len(kv[1]), kv[0]))[:top_k]
         print(f"Top {top_k} longest tokens (by bytes):")
         for rank, (tok_id, tok_bytes) in enumerate(longest_items, start=1):
-            print(f"  {rank}) id={tok_id}, len={len(tok_bytes)} bytes, value={_format_bytes(tok_bytes)}")
+            print(
+                f"  {rank}) id={tok_id}, len={len(tok_bytes)} bytes, value={_format_bytes(tok_bytes)}"
+            )
 
 
 def print_merges_sample(merges: list[tuple[bytes, bytes]], limit: int = 20) -> None:
@@ -48,11 +51,16 @@ def print_merges_sample(merges: list[tuple[bytes, bytes]], limit: int = 20) -> N
     print(f"Merges sample (first {len(take)} of {len(merges)}):")
     for i, (a, b) in enumerate(take):
         merged = a + b
-        print(f"  {i}: {_format_bytes(a)} + {_format_bytes(b)} -> {_format_bytes(merged)}")
+        print(
+            f"  {i}: {_format_bytes(a)} + {_format_bytes(b)} -> {_format_bytes(merged)}"
+        )
 
 
 def save_bpe_msgpack(
-    vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]], out_path: str | Path, compress: bool = True
+    vocab: dict[int, bytes],
+    merges: list[tuple[bytes, bytes]],
+    out_path: str | Path,
+    compress: bool = True,
 ):
     payload = {
         "format": "bpe-msgpack-v1",

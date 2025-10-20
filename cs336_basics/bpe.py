@@ -15,7 +15,9 @@ import regex as re
 
 from .utility import print_bpe_result, save_bpe_msgpack
 
-PATTERN: Final[str] = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+PATTERN: Final[str] = (
+    r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+)
 ENDOFTEXT: Final[str] = "<|endoftext|>"
 
 ChunkRange: TypeAlias = tuple[int, int]
@@ -102,7 +104,9 @@ def train_bpe(
     resolved_special_tokens = _normalize_special_tokens(special_tokens)
 
     with open(input_path, "rb") as file:
-        boundaries = find_chunk_boundaries(file, _effective_worker_count(num_workers), ENDOFTEXT.encode("utf-8"))
+        boundaries = find_chunk_boundaries(
+            file, _effective_worker_count(num_workers), ENDOFTEXT.encode("utf-8")
+        )
     chunk_ranges: list[ChunkRange] = list(zip(boundaries[:-1], boundaries[1:]))
     num_ranges = len(chunk_ranges)
     worker_count = _effective_worker_count(num_workers, num_ranges)
@@ -117,11 +121,15 @@ def train_bpe(
         pre_token_counts,
         len(resolved_special_tokens),
     )
-    merge_candidate_heap: list[MergeHeapEntry] = _build_merge_candidate_heap(pair_counts, vocab_lexkey)
+    merge_candidate_heap: list[MergeHeapEntry] = _build_merge_candidate_heap(
+        pair_counts, vocab_lexkey
+    )
 
     merged_index_pairs: list[MergePair] = []
     while len(vocab_list) < vocab_size:
-        pair_to_merge: MergePair | None = _select_most_frequent_pair(merge_candidate_heap, pair_version)
+        pair_to_merge: MergePair | None = _select_most_frequent_pair(
+            merge_candidate_heap, pair_version
+        )
         if pair_to_merge is None:
             break
         new_token_id = len(vocab_list)
@@ -166,7 +174,9 @@ def _normalize_special_tokens(tokens: Sequence[str] | None) -> list[str]:
     return list(dict.fromkeys(tokens))
 
 
-def _effective_worker_count(num_workers: int | None, num_chunks: int | None = None) -> int:
+def _effective_worker_count(
+    num_workers: int | None, num_chunks: int | None = None
+) -> int:
     """Pick a worker count that respects CPU availability and chunk count."""
     available = max(1, cpu_count() - 1)
     capped = min(num_workers or available, available)
@@ -180,7 +190,9 @@ def _get_or_compile_pattern(pattern: str) -> re.Pattern:
     return _COMPILED_TOKEN_PATTERNS.setdefault(pattern, re.compile(pattern))
 
 
-def _get_or_compile_special_split_pattern(special_tokens: Sequence[str]) -> re.Pattern | None:
+def _get_or_compile_special_split_pattern(
+    special_tokens: Sequence[str],
+) -> re.Pattern | None:
     """Return a cached regex that isolates special tokens during pre-tokenisation."""
     if not special_tokens:
         return None
@@ -217,7 +229,9 @@ def _collect_pre_token_counts_from_ranges(
         initializer=_initialize_worker_regex_cache,
         initargs=(tuple(special_tokens), pattern),
     ) as pool:
-        for counter in pool.imap_unordered(worker_func, chunk_ranges, chunksize=chunksize):
+        for counter in pool.imap_unordered(
+            worker_func, chunk_ranges, chunksize=chunksize
+        ):
             aggregated.update(counter)
     return aggregated
 
@@ -230,7 +244,9 @@ def _initialize_worker_regex_cache(special_tokens: Sequence[str], pattern: str) 
     _WORKER_REGEX_CACHE["pattern"] = pattern_re
 
 
-def _process_range_for_pretokenization(path: str, offset_span: ChunkRange) -> Counter[bytes]:
+def _process_range_for_pretokenization(
+    path: str, offset_span: ChunkRange
+) -> Counter[bytes]:
     """Worker helper: read a byte span and emit regex-pre-tokenised counts."""
     start, end = offset_span
     with open(path, "rb") as f:
@@ -246,13 +262,17 @@ def _process_range_for_pretokenization(path: str, offset_span: ChunkRange) -> Co
     for segment in segments:
         if not segment:
             continue
-        pre_tokens.update(match.group(0).encode("utf-8") for match in pattern_re.finditer(segment))
+        pre_tokens.update(
+            match.group(0).encode("utf-8") for match in pattern_re.finditer(segment)
+        )
     return pre_tokens
 
 
 def _build_initial_vocab(special_tokens: Iterable[str]) -> list[bytes]:
     """Construct the starting vocabulary of special tokens plus single bytes."""
-    return [token.encode("utf-8") for token in special_tokens] + [bytes([byte]) for byte in range(256)]
+    return [token.encode("utf-8") for token in special_tokens] + [
+        bytes([byte]) for byte in range(256)
+    ]
 
 
 def _initialize_pair_statistics(
@@ -286,7 +306,9 @@ def _build_merge_candidate_heap(
 ) -> list[MergeHeapEntry]:
     """Populate a heap of merge candidates ordered by frequency and lexical key."""
     merge_candidate_heap = [
-        (-freq, vocab_lexkey[a], vocab_lexkey[b], a, b, 0) for (a, b), freq in pair_counts.items() if freq > 0
+        (-freq, vocab_lexkey[a], vocab_lexkey[b], a, b, 0)
+        for (a, b), freq in pair_counts.items()
+        if freq > 0
     ]
     heapify(merge_candidate_heap)
     return merge_candidate_heap
@@ -367,5 +389,7 @@ if __name__ == "__main__":
     # train_bpe(input_path="data/TinyStoriesV2-GPT4-valid.txt")
 
     # train
-    bpe_result = train_bpe(input_path="data/TinyStoriesV2-GPT4-train.txt", vocab_size=10000, save=False)
+    bpe_result = train_bpe(
+        input_path="data/TinyStoriesV2-GPT4-train.txt", vocab_size=10000, save=False
+    )
     print_bpe_result(bpe_result=bpe_result)

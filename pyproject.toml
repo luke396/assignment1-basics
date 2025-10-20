@@ -22,6 +22,7 @@ dependencies = [
     "py-spy>=0.4.1",
     "msgpack>=1.1.2",
     "memray>=1.19.1",
+    "ruff>=0.14.1",
 ]
 
 [build-system]
@@ -42,7 +43,7 @@ log_cli_level = "WARNING"
 addopts = "-s"
 
 [tool.ruff]
-line-length = 120
+line-length = 90
 
 [tool.ruff.lint.extend-per-file-ignores]
 # Also ignore `E402` in all `__init__.py` files.
