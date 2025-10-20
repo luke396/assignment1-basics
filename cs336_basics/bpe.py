@@ -6,7 +6,7 @@ import os
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from functools import partial
-from heapq import heappop, heappush
+from heapq import heapify, heappop, heappush
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import BinaryIO
@@ -99,21 +99,23 @@ def train_bpe(
 
     with open(input_path, "rb") as file:
         boundaries = find_chunk_boundaries(file, _effective_worker_count(num_workers), ENDOFTEXT_BYTES)
-    ranges: Iterable[tuple[int, int]] = ((start, end) for start, end in zip(boundaries[:-1], boundaries[1:]))
-    ranges_len = len(boundaries) - 1
+    ranges = list(zip(boundaries[:-1], boundaries[1:]))
+    ranges_len = len(ranges)
     worker_count = _effective_worker_count(num_workers, ranges_len)
     pre_token_counts = _collect_pre_token_counts_from_ranges(
-        str(input_path), ranges, ranges_len, resolved_special_tokens, pattern, worker_count
+        str(input_path), ranges, resolved_special_tokens, pattern, worker_count
     )
 
     vocab_list = _build_initial_vocab(resolved_special_tokens)
-    vocab_lexkey = [tuple([255 - byte for byte in tok] + [255]) for tok in vocab_list]
+    vocab_lexkey = [_lexkey(tok) for tok in vocab_list]
 
     pair_counts, token_splits, pair_to_tokens, pair_version = _initialise_pair_counts(
         pre_token_counts,
         len(resolved_special_tokens),
     )
-    pair_entry_heap: list[tuple[int, int, int, int, int, int]] = _init_pair_entry_heap(pair_counts, vocab_lexkey)
+    pair_entry_heap: list[tuple[int, tuple[int, ...], tuple[int, ...], int, int, int]] = _init_pair_entry_heap(
+        pair_counts, vocab_lexkey
+    )
 
     merges_id: list[tuple[int, int]] = []
     while len(vocab_list) < vocab_size:
@@ -123,7 +125,7 @@ def train_bpe(
         new_token_id = len(vocab_list)
         new_token = vocab_list[pair_to_merge[0]] + vocab_list[pair_to_merge[1]]
         vocab_list.append(new_token)
-        vocab_lexkey.append(tuple([255 - b for b in new_token] + [255]))
+        vocab_lexkey.append(_lexkey(new_token))
         _apply_merge(
             new_token_id,
             pair_to_merge,
@@ -148,54 +150,43 @@ def train_bpe(
     return vocab, merges
 
 
+def _lexkey(new_token):
+    return tuple(255 - b for b in new_token) + (255,)
+
+
 def _normalise_special_tokens(tokens: Sequence[str] | None) -> list[str]:
     """Return a de-duplicated, ordered list of special tokens."""
 
     if not tokens:
         return [ENDOFTEXT]
 
-    seen: set[str] = set()
-    normalised: list[str] = []
-    for token in tokens:
-        if token not in seen:
-            normalised.append(token)
-            seen.add(token)
-    return normalised
+    return list(dict.fromkeys(tokens))
 
 
 def _effective_worker_count(num_workers: int | None, num_chunks: int | None = None) -> int:
     """Pick a worker count that respects CPU availability and chunk count."""
-    available = cpu_count() - 1 or 1
-    requested = num_workers or available
-    capped = min(requested, available)
+    available = max(1, cpu_count() - 1)
+    capped = min(num_workers or available, available)
     if num_chunks is not None:
         capped = min(capped, max(1, num_chunks))
     return max(1, capped)
 
 
 def _get_compiled_pattern(pattern: str) -> re.Pattern:
-    pat = _COMPILED_PATTERNS.get(pattern)
-    if pat is None:
-        pat = re.compile(pattern)
-        _COMPILED_PATTERNS[pattern] = pat
-    return pat
+    return _COMPILED_PATTERNS.setdefault(pattern, re.compile(pattern))
 
 
 def _get_compiled_special_split(special_tokens: Sequence[str]) -> re.Pattern | None:
     if not special_tokens:
         return None
-    key = ("|".join(re.escape(token) for token in special_tokens), tuple(special_tokens))
-    pat = _COMPILED_SPECIAL_SPLITS.get(key)
-    if pat is None:
-        pat = re.compile(key[0])
-        _COMPILED_SPECIAL_SPLITS[key] = pat
-    return pat
+    joined = "|".join(re.escape(token) for token in special_tokens)
+    key = (joined, tuple(special_tokens))
+    return _COMPILED_SPECIAL_SPLITS.setdefault(key, re.compile(joined))
 
 
 def _collect_pre_token_counts_from_ranges(
     input_path: str,
-    ranges: Iterable[tuple[int, int]],
-    ranges_len: int,
+    ranges: Sequence[tuple[int, int]],
     special_tokens: Sequence[str],
     pattern: str,
     worker_count: int,
@@ -209,6 +200,7 @@ def _collect_pre_token_counts_from_ranges(
     if not ranges:
         return Counter()
 
+    ranges_len = len(ranges)
     worker_func = partial(_process_range_for_pretokenization, input_path)
     if chunksize is None:
         base = max(1, ranges_len // (worker_count * 8))
@@ -229,19 +221,12 @@ def _init_worker(special_tokens, pattern):
     global WORKER_RE_PATTERN
     special_split_re = _get_compiled_special_split(special_tokens)
     pat_re = _get_compiled_pattern(pattern)
-    WORKER_RE_PATTERN["special"] = special_split_re
-    WORKER_RE_PATTERN["pattern"] = pat_re
+    WORKER_RE_PATTERN["special"], WORKER_RE_PATTERN["pattern"] = special_split_re, pat_re
 
 
-def _process_range_for_pretokenization(
-    path: str,
-    range: tuple[
-        int,
-        int,
-    ],
-) -> Counter[bytes]:
+def _process_range_for_pretokenization(path: str, span: tuple[int, int]) -> Counter[bytes]:
     """Worker: open file, read [start:end], and tokenise like chunk path."""
-    (start, end) = range
+    start, end = span
     with open(path, "rb") as f:
         f.seek(start)
         data = f.read(end - start).decode("utf-8", errors="ignore")
@@ -260,9 +245,7 @@ def _process_range_for_pretokenization(
 
 def _build_initial_vocab(special_tokens: Iterable[str]) -> list[bytes]:
     """Construct the starting vocabulary of special tokens plus single bytes."""
-    vocab_list = [token.encode("utf-8") for token in special_tokens]
-    vocab_list.extend(bytes([byte]) for byte in range(256))
-    return vocab_list
+    return [token.encode("utf-8") for token in special_tokens] + [bytes([byte]) for byte in range(256)]
 
 
 def _initialise_pair_counts(
@@ -275,7 +258,6 @@ def _initialise_pair_counts(
     token_splits: dict[bytes, list[int]] = {}
     pair_to_tokens: dict[tuple[int, int], set[bytes]] = defaultdict(set)
     pair_version: dict[tuple[int, int], int] = defaultdict(int)
-    init_pair_version = 0
 
     for token_bytes, frequency in pre_token_counts.items():
         split_int = [b + symbol_offset for b in token_bytes]
@@ -283,37 +265,28 @@ def _initialise_pair_counts(
         for idx in range(len(split_int) - 1):
             pair = (split_int[idx], split_int[idx + 1])
             pair_counts[pair] += frequency
-            pair_version[pair] = init_pair_version
             pair_to_tokens[pair].add(token_bytes)
 
     return pair_counts, token_splits, pair_to_tokens, pair_version
 
 
 def _init_pair_entry_heap(pair_counts, vocab_lexkey):
-    pair_entry_heap = []
-    for (a, b), freq in pair_counts.items():
-        if freq > 0:
-            entry: tuple[int, int, int, int, int, int] = (
-                -freq,
-                vocab_lexkey[a],
-                vocab_lexkey[b],
-                a,
-                b,
-                0,
-            )
-            heappush(pair_entry_heap, entry)
+    pair_entry_heap = [
+        (-freq, vocab_lexkey[a], vocab_lexkey[b], a, b, 0) for (a, b), freq in pair_counts.items() if freq > 0
+    ]
+    heapify(pair_entry_heap)
     return pair_entry_heap
 
 
 def _select_most_frequent_pair(
-    pair_entry_heap: list[tuple[int, int, int, int, int, int]],
+    pair_entry_heap: list[tuple[int, tuple[int, ...], tuple[int, ...], int, int, int]],
     pair_version: dict[tuple[int, int], int],
 ) -> tuple[int, int] | None:
     """Return the most frequent pair, or ``None`` if no positive counts remain."""
     while pair_entry_heap:
-        negcnt, voblex_a, voblex_b, a, b, version = heappop(pair_entry_heap)
+        negcnt, _, _, a, b, version = heappop(pair_entry_heap)
         if negcnt < 0 and pair_version[a, b] == version:
-            return (a, b)
+            return a, b
     return None
 
 
@@ -325,13 +298,13 @@ def _apply_merge(
     token_splits: dict[bytes, list[int]],
     pair_counts: Counter[tuple[int, int]],
     pair_version: dict[tuple[int, int], int],
-    pair_entry_heap: list[tuple[int, int, int, int, int, int]],
+    pair_entry_heap: list[tuple[int, tuple[int, ...], tuple[int, ...], int, int, int]],
     vocab_lexkey: list[tuple[int, ...]],
 ):
     """Apply a merge to all token splits and update neighbouring pair counts."""
     tokens = pair_to_token[pair]
     a, b = pair
-    changed_cnt = Counter()  # collect and sum in one time
+    changed_cnt = Counter()
     for token in list(tokens):
         split = token_splits[token]
         freq = pre_token_counts[token]
@@ -364,22 +337,15 @@ def _apply_merge(
     pair_counts.update(changed_cnt)
     pair_counts[pair] = 0
 
-    for (a, b), _ in changed_cnt.items():
-        freq = pair_counts[(a, b)]
-        pair_version[a, b] += 1  # freq <= 0, igore and not push to heap
+    for a, b in changed_cnt:
+        freq = pair_counts[a, b]
+        pair_version[a, b] += 1  # freq <= 0, ignore and not pushed
         if freq > 0:
             heappush(
                 pair_entry_heap,
-                (
-                    -freq,
-                    vocab_lexkey[a],
-                    vocab_lexkey[b],
-                    a,
-                    b,
-                    pair_version[a, b],
-                ),
+                (-freq, vocab_lexkey[a], vocab_lexkey[b], a, b, pair_version[a, b]),
             )
-    pair_version[pair[0], pair[1]] += 1
+    pair_version[pair] += 1
 
 
 if __name__ == "__main__":
