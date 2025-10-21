@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from collections import Counter, defaultdict
@@ -14,7 +15,7 @@ from typing import BinaryIO, Final, TypeAlias
 
 import regex as re
 
-from .utility import print_bpe_result, save_bpe_msgpack
+from .utility import print_bpe_result
 
 PATTERN: Final[str] = (
     r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
@@ -119,7 +120,8 @@ def train_bpe(
         num_workers: Optional worker count for multiprocessing.  Defaults to
             the CPU count, but never exceeds the number of chunks available.
         pattern: Regular expression used for pre-tokenisation.
-        save: Whether to store the resulting tokenizer as ``tokenizer.msgpack.gz``.
+        save: Whether to save the tokenizer as ``tokenizer_vocab.json`` and
+            ``tokenizer_merges.json`` in the same directory as the input file.
 
     Returns:
         A tuple ``(vocab, merges)`` where:
@@ -225,15 +227,50 @@ def train_bpe(
 
     if save:
         base_path = Path(input_path)
-        out_path = base_path.parent / "tokenizer.msgpack.gz"
-        save_bpe_msgpack(vocab, merges, out_path)
+        dataset_name = base_path.stem  # Extract filename without extension
+        vocab_out = base_path.parent / f"tokenizer_vocab_{dataset_name}_{vocab_size}.json"
+        merges_out = (
+            base_path.parent / f"tokenizer_merges_{dataset_name}_{vocab_size}.json"
+        )
+
+        vocab_payload = _format_vocab(vocab)
+        merges_payload = _format_merges(merges)
+
+        vocab_out.parent.mkdir(parents=True, exist_ok=True)
+        merges_out.parent.mkdir(parents=True, exist_ok=True)
+
+        with vocab_out.open("w", encoding="utf-8") as vocab_file:
+            json.dump(vocab_payload, vocab_file, indent=2, ensure_ascii=True)
+            vocab_file.write("\n")
+
+        with merges_out.open("w", encoding="utf-8") as merges_file:
+            json.dump(merges_payload, merges_file, indent=2, ensure_ascii=True)
+            merges_file.write("\n")
+
         try:
-            file_size_bytes = out_path.stat().st_size
+            vocab_size_bytes = vocab_out.stat().st_size
+            merges_size_bytes = merges_out.stat().st_size
         except OSError:
-            file_size_bytes = -1
-        logger.info("Tokenizer saved to %s (size=%d bytes)", out_path, file_size_bytes)
+            vocab_size_bytes = merges_size_bytes = -1
+        logger.info(
+            "Tokenizer saved to %s (size=%d bytes) and %s (size=%d bytes)",
+            vocab_out,
+            vocab_size_bytes,
+            merges_out,
+            merges_size_bytes,
+        )
 
     return vocab, merges
+
+
+def _format_vocab(vocab: dict[int, bytes]) -> dict[str, str]:
+    """Convert vocab mapping into a JSON-serialisable dict."""
+    return {str(token_id): token_bytes.hex() for token_id, token_bytes in vocab.items()}
+
+
+def _format_merges(merges: list[tuple[bytes, bytes]]) -> list[list[str]]:
+    """Convert merges sequence into a JSON-serialisable list."""
+    return [[left.hex(), right.hex()] for left, right in merges]
 
 
 def _lexkey(token_bytes: bytes) -> tuple[int, ...]:
@@ -464,13 +501,70 @@ def _apply_merge(
 
 
 if __name__ == "__main__":
-    # test/debug
-    # bpe_result = train_bpe(
-    #     input_path="data/TinyStoriesV2-GPT4-valid.txt", vocab_size=1000, save=False
-    # )
+    import argparse
 
-    # train
-    # bpe_result = train_bpe(input_path="data/owt_train.txt", vocab_size=10000, save=True)
+    DATASET_CONFIGS = {
+        "tinystories_valid": {
+            "path": "data/TinyStoriesV2-GPT4-valid.txt",
+            "default_vocab_size": 1000,
+        },
+        "tinystories_train": {
+            "path": "data/TinyStoriesV2-GPT4-train.txt",
+            "default_vocab_size": 10000,
+        },
+        "owt_valid": {
+            "path": "data/owt_valid.txt",
+            "default_vocab_size": 1000,
+        },
+        "owt_train": {
+            "path": "data/owt_train.txt",
+            "default_vocab_size": 32000,
+        },
+    }
 
-    # print_bpe_result(bpe_result=bpe_result)
-    print_bpe_result(output_path=Path("data/tokenizer.msgpack.gz"))
+    parser = argparse.ArgumentParser(description="Train BPE tokenizer")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        choices=list(DATASET_CONFIGS.keys()),
+        default="tinystories_valid",
+        help="Dataset to use for training",
+    )
+    parser.add_argument(
+        "--vocab-size",
+        type=int,
+        default=None,
+        help="Vocabulary size (defaults to dataset-specific value if not specified)",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="Number of workers for multiprocessing",
+    )
+    parser.add_argument(
+        "--no-save",
+        action="store_true",
+        help="Do not save the tokenizer files",
+    )
+
+    args = parser.parse_args()
+
+    config = DATASET_CONFIGS[args.dataset]
+    vocab_size = args.vocab_size or config["default_vocab_size"]
+
+    logger.info(
+        "Training BPE tokenizer: dataset=%s, vocab_size=%d, num_workers=%s",
+        args.dataset,
+        vocab_size,
+        args.num_workers,
+    )
+
+    bpe_result = train_bpe(
+        input_path=config["path"],
+        vocab_size=vocab_size,
+        num_workers=args.num_workers,
+        save=not args.no_save,
+    )
+
+    print_bpe_result(bpe_result=bpe_result)
