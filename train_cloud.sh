@@ -1,0 +1,1 @@
+python -m cs336_basics.bpe ; /usr/bin/shutdown   

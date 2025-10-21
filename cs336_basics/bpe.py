@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
@@ -28,6 +29,30 @@ TokenIdSplit: TypeAlias = list[int]
 _COMPILED_TOKEN_PATTERNS: dict[str, re.Pattern] = {}
 _COMPILED_SPECIAL_SPLIT_PATTERNS: dict[tuple[str, tuple[str, ...]], re.Pattern] = {}
 _WORKER_REGEX_CACHE: dict[str, re.Pattern | None] = {}
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_LOG_PATH = Path(__file__).resolve().parent / "bpe_training.log"
+_LOG_FILE_SETUP_DONE = False
+
+
+def _ensure_file_logging(log_path: Path | str | None = None) -> Path:
+    """Ensure module logger writes INFO+ messages to a persistent file."""
+    global _LOG_FILE_SETUP_DONE
+    resolved_path = Path(log_path) if log_path else DEFAULT_LOG_PATH
+    if _LOG_FILE_SETUP_DONE:
+        return resolved_path
+
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(resolved_path, mode="a", encoding="utf-8")
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    _LOG_FILE_SETUP_DONE = True
+    logger.info("File logging initialized at %s", resolved_path)
+    return resolved_path
 
 
 def find_chunk_boundaries(
@@ -101,53 +126,99 @@ def train_bpe(
             * ``vocab`` maps token indices to their byte representations.
             * ``merges`` captures the ordered sequence of byte pair merges.
     """
+    _ensure_file_logging()
     resolved_special_tokens = _normalize_special_tokens(special_tokens)
 
+    requested_chunks = _effective_worker_count(num_workers)
     with open(input_path, "rb") as file:
         boundaries = find_chunk_boundaries(
-            file, _effective_worker_count(num_workers), ENDOFTEXT.encode("utf-8")
+            file, requested_chunks, ENDOFTEXT.encode("utf-8")
         )
+    file_size = boundaries[-1] if boundaries else 0
     chunk_ranges: list[ChunkRange] = list(zip(boundaries[:-1], boundaries[1:]))
     num_ranges = len(chunk_ranges)
     worker_count = _effective_worker_count(num_workers, num_ranges)
+    logger.info(
+        "Chunking complete for %s: file_size=%d bytes, desired_chunks=%d, actual_chunks=%d, worker_count=%d",
+        input_path,
+        file_size,
+        requested_chunks,
+        num_ranges,
+        worker_count,
+    )
     pre_token_counts = _collect_pre_token_counts_from_ranges(
         str(input_path), chunk_ranges, resolved_special_tokens, pattern, worker_count
+    )
+    total_pre_tokens = sum(pre_token_counts.values())
+    logger.info(
+        "Collected pre-token counts: unique_tokens=%d, total_tokens=%d",
+        len(pre_token_counts),
+        total_pre_tokens,
     )
 
     vocab_list = _build_initial_vocab(resolved_special_tokens)
     vocab_lexkey = [_lexkey(tok) for tok in vocab_list]
+    logger.debug(
+        "Initial vocab constructed: size=%d (includes %d special tokens)",
+        len(vocab_list),
+        len(resolved_special_tokens),
+    )
 
     pair_counts, token_splits, pair_to_tokens, pair_version = _initialize_pair_statistics(
         pre_token_counts,
         len(resolved_special_tokens),
+    )
+    logger.info(
+        "Pair statistics initialized: pair_counts=%d, tracked_tokens=%d",
+        len(pair_counts),
+        len(token_splits),
     )
     merge_candidate_heap: list[MergeHeapEntry] = _build_merge_candidate_heap(
         pair_counts, vocab_lexkey
     )
 
     merged_index_pairs: list[MergePair] = []
-    while len(vocab_list) < vocab_size:
-        pair_to_merge: MergePair | None = _select_most_frequent_pair(
-            merge_candidate_heap, pair_version
+    try:
+        while len(vocab_list) < vocab_size:
+            pair_to_merge: MergePair | None = _select_most_frequent_pair(
+                merge_candidate_heap, pair_version
+            )
+            if pair_to_merge is None:
+                logger.warning(
+                    "Merge loop ended early: no more pairs to merge after %d merges",
+                    len(merged_index_pairs),
+                )
+                break
+            new_token_id = len(vocab_list)
+            new_token = vocab_list[pair_to_merge[0]] + vocab_list[pair_to_merge[1]]
+            vocab_list.append(new_token)
+            vocab_lexkey.append(_lexkey(new_token))
+            _apply_merge(
+                new_token_id,
+                pair_to_merge,
+                pair_to_tokens,
+                pre_token_counts,
+                token_splits,
+                pair_counts,
+                pair_version,
+                merge_candidate_heap,
+                vocab_lexkey,
+            )
+            merged_index_pairs.append(pair_to_merge)
+    except MemoryError:
+        logger.warning(
+            "MemoryError during merge loop: completed_merges=%d, current_vocab_size=%d",
+            len(merged_index_pairs),
+            len(vocab_list),
         )
-        if pair_to_merge is None:
-            break
-        new_token_id = len(vocab_list)
-        new_token = vocab_list[pair_to_merge[0]] + vocab_list[pair_to_merge[1]]
-        vocab_list.append(new_token)
-        vocab_lexkey.append(_lexkey(new_token))
-        _apply_merge(
-            new_token_id,
-            pair_to_merge,
-            pair_to_tokens,
-            pre_token_counts,
-            token_splits,
-            pair_counts,
-            pair_version,
-            merge_candidate_heap,
-            vocab_lexkey,
-        )
-        merged_index_pairs.append(pair_to_merge)
+        raise
+
+    logger.info(
+        "Merge loop finished: total_merges=%d, final_vocab_size=%d (target=%d)",
+        len(merged_index_pairs),
+        len(vocab_list),
+        vocab_size,
+    )
 
     vocab = {idx: token for idx, token in enumerate(vocab_list)}
     merges = [(vocab_list[i], vocab_list[j]) for i, j in merged_index_pairs]
@@ -156,6 +227,11 @@ def train_bpe(
         base_path = Path(input_path)
         out_path = base_path.parent / "tokenizer.msgpack.gz"
         save_bpe_msgpack(vocab, merges, out_path)
+        try:
+            file_size_bytes = out_path.stat().st_size
+        except OSError:
+            file_size_bytes = -1
+        logger.info("Tokenizer saved to %s (size=%d bytes)", out_path, file_size_bytes)
 
     return vocab, merges
 
@@ -220,8 +296,11 @@ def _collect_pre_token_counts_from_ranges(
     num_ranges = len(chunk_ranges)
     worker_func = partial(_process_range_for_pretokenization, input_path)
     if chunksize is None:
-        base = max(1, num_ranges // (worker_count * 8))
-        chunksize = min(256, max(4, base))
+        if worker_count >= num_ranges:
+            chunksize = 1
+        else:
+            base = max(1, num_ranges // (worker_count * 8))
+            chunksize = min(256, base)
 
     aggregated: Counter[bytes] = Counter()
     with Pool(
@@ -386,10 +465,11 @@ def _apply_merge(
 
 if __name__ == "__main__":
     # test/debug
-    # train_bpe(input_path="data/TinyStoriesV2-GPT4-valid.txt")
+    bpe_result = train_bpe(
+        input_path="data/TinyStoriesV2-GPT4-valid.txt", vocab_size=1000, save=False
+    )
 
     # train
-    bpe_result = train_bpe(
-        input_path="data/TinyStoriesV2-GPT4-train.txt", vocab_size=10000, save=False
-    )
+    # bpe_result = train_bpe(input_path="data/owt_train.txt", vocab_size=10000, save=False)
+
     print_bpe_result(bpe_result=bpe_result)
