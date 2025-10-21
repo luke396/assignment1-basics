@@ -465,11 +465,12 @@ def _apply_merge(
 
 if __name__ == "__main__":
     # test/debug
-    bpe_result = train_bpe(
-        input_path="data/TinyStoriesV2-GPT4-valid.txt", vocab_size=1000, save=False
-    )
+    # bpe_result = train_bpe(
+    #     input_path="data/TinyStoriesV2-GPT4-valid.txt", vocab_size=1000, save=False
+    # )
 
     # train
-    # bpe_result = train_bpe(input_path="data/owt_train.txt", vocab_size=10000, save=False)
+    # bpe_result = train_bpe(input_path="data/owt_train.txt", vocab_size=10000, save=True)
 
-    print_bpe_result(bpe_result=bpe_result)
+    # print_bpe_result(bpe_result=bpe_result)
+    print_bpe_result(output_path=Path("data/tokenizer.msgpack.gz"))

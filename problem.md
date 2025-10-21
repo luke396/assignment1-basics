@@ -5,8 +5,8 @@
 
 ## unicode1
 
-a. chr(0) is return '\x00'
-b. print it return nothing, the `__repr__()` is '\x00' as what we have seen above
+a. chr(0) returns '\x00'
+b. printing it returns nothing; the `__repr__()` is '\x00', as we have seen above
 c.
 
 ```python
@@ -18,9 +18,9 @@ this is a teststring
 
 ## unicode 2
 
-a. Using utf-8 instead of utf-16 or utf-32, because utf-8 provides shorter int list.
-b. Because the code using `bytes([b]).decode`, which assume that any single bytes can be decodes,
-but, '你好' 's encode can't directly decode back for just a single bytes.
+a. Use utf-8 instead of utf-16 or utf-32 because utf-8 provides a shorter int list.
+b. The code uses `bytes([b]).decode`, which assumes that any single byte can be decoded,
+but the encoding of '你好' cannot be decoded back from just a single byte.
 
 ```python
 >>> '你'.encode('utf-8')
@@ -54,7 +54,7 @@ UnicodeDecodeError: 'utf-8' codec can't decode bytes in position 0-1: unexpected
 
 (a)
 
-Training our bpe model on TinyStories dataset with vocab size 10000, will cost 1m45s. Reading the result, the longest tokens below, and they are totally make sense.
+Training our bpe model on the TinyStories dataset with vocab size 10000 takes about 1m45s. Reading the result, the longest tokens below all make sense.
 
 ```shell
 Top 5 longest tokens (by bytes):
@@ -73,16 +73,44 @@ uv run py-spy record -o bpe_profile.svg -- python cs336_basics/bpe.py
 
 ![bpe_profile.svg](./output/bpe_profile.svg)
 
-> We get the fire graph , and we can see that the most time consuming part is `_apply_merge` function, which is updating token count using increase method.
-> Before this, the most time comsuming part is file transfer in multiprocessing, which we can optimize by transferring the `start` and `end` index instead of the whole text chunk.
+> We get the flame graph, and we can see that the most time-consuming part is the `_apply_merge` function, which updates the token count using the increase method.
+> Before this, the most time-consuming part was file transfer in multiprocessing, which we optimized by transferring the `start` and `end` indices instead of the whole text chunk.
 
-After some optimization of `apply_merge` using sub_tokens instead of whole tokens, optimize `_select_most_frequent_pair` using heapq, and optimize the multiprocessing file transfer, we finally get the fire graph, all parts time consuming are relatively small and balanced.
+After optimizing `apply_merge` to use sub_tokens instead of whole tokens, optimizing `_select_most_frequent_pair` with `heapq`, and improving the multiprocessing file transfer, we finally get the flame graph, where all time-consuming parts are relatively small and balanced.
 
-> fire graph's time consuming is including all the subprocesses' time consuming. Not the system time only.
-> Actually the most time consuming part is `_process_range_for_pretokenization` function, which is reading file and pre-tokenizing. Using `scalene` we can check the system time.
+> The flame graph's timing includes all subprocesses, not just system time.
+> In fact, the most time-consuming part is the `_process_range_for_pretokenization` function, which reads the file and pre-tokenizes. Using `scalene` we can check the system time.
 
 ## train_bpe_expts_owt
 
-This is a really big dataset. My local machine with 16GB RAM can't handle it. Some optimization likes stream loading pre-tokens, but the implementation is really complex. So I just run it on a cloud server with more RAM.
+(a) This is a really big dataset. My local machine with 16GB RAM can't handle it. Some optimizations like streaming pre-tokens are possible, but the implementation is really complex, so I ran it on a cloud server with more RAM.
+
+```shell
+Top 20 longest tokens (by bytes):
+  1) id=31286, len=27 bytes, value=b'---------------------------' (hex=2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d)
+  2) id=30220, len=25 bytes, value=b'-------------------------' (hex=2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d)
+  3) id=28759, len=23 bytes, value=b'-----------------------' (hex=2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d)
+  4) id=27276, len=21 bytes, value=b'---------------------' (hex=2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d)
+  5) id=23354, len=19 bytes, value=b' disproportionately' (hex=2064697370726f706f7274696f6e6174656c79)
+  6) id=24299, len=19 bytes, value=b' telecommunications' (hex=2074656c65636f6d6d756e69636174696f6e73)
+  7) id=26017, len=19 bytes, value=b'-------------------' (hex=2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d)
+  8) id=28317, len=18 bytes, value=b' environmentalists' (hex=20656e7669726f6e6d656e74616c69737473)
+  9) id=31683, len=18 bytes, value=b' -----------------' (hex=202d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d)
+  10) id=14298, len=17 bytes, value=b' responsibilities' (hex=20726573706f6e736962696c6974696573)
+  11) id=16300, len=17 bytes, value=b' unconstitutional' (hex=20756e636f6e737469747574696f6e616c)
+  12) id=24598, len=17 bytes, value=b'-----------------' (hex=2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d)
+  13) id=25729, len=17 bytes, value=b' cryptocurrencies' (hex=2063727970746f63757272656e63696573)
+  14) id=26104, len=17 bytes, value=b' disproportionate' (hex=2064697370726f706f7274696f6e617465)
+  15) id=27085, len=17 bytes, value=b' misunderstanding' (hex=206d6973756e6465727374616e64696e67)
+  16) id=28544, len=17 bytes, value=b' counterterrorism' (hex=20636f756e746572746572726f7269736d)
+  17) id=29869, len=17 bytes, value=b'_________________' (hex=5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f)
+  18) id=30256, len=17 bytes, value=b' characterization' (hex=20636861726163746572697a6174696f6e)
+  19) id=9260, len=16 bytes, value=b' representatives' (hex=20726570726573656e74617469766573)
+  20) id=10287, len=16 bytes, value=b' recommendations' (hex=207265636f6d6d656e646174696f6e73)
+```
+
+Some longest tokens look strange, but the training data actually contains vocab like '---------------------------', so this is reasonable.
+
+(b) The tokenizers trained on TinyStories and OWT are different. The vocabularies and merges depend on the training data's specific patterns.
 
 ## tokenizer
