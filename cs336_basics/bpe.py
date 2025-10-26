@@ -27,9 +27,9 @@ MergePair: TypeAlias = tuple[int, int]
 MergeHeapEntry: TypeAlias = tuple[int, tuple[int, ...], tuple[int, ...], int, int, int]
 TokenIdSplit: TypeAlias = list[int]
 
-_COMPILED_TOKEN_PATTERNS: dict[str, re.Pattern] = {}
-_COMPILED_SPECIAL_SPLIT_PATTERNS: dict[tuple[str, tuple[str, ...]], re.Pattern] = {}
-_WORKER_REGEX_CACHE: dict[str, re.Pattern | None] = {}
+COMPILED_TOKEN_PATTERNS: dict[str, re.Pattern] = {}
+COMPILED_SPECIAL_SPLIT_PATTERNS: dict[tuple[str, tuple[str, ...]], re.Pattern] = {}
+WORKER_REGEX_CACHE: dict[str, re.Pattern | None] = {}
 
 logger = logging.getLogger(__name__)
 
@@ -298,20 +298,22 @@ def _effective_worker_count(
     return max(1, capped)
 
 
-def _get_or_compile_pattern(pattern: str) -> re.Pattern:
+def get_or_compile_pattern(pattern: str) -> re.Pattern:
     """Return a cached regex pattern for the provided pattern string."""
-    return _COMPILED_TOKEN_PATTERNS.setdefault(pattern, re.compile(pattern))
+    return COMPILED_TOKEN_PATTERNS.setdefault(pattern, re.compile(pattern))
 
 
-def _get_or_compile_special_split_pattern(
+def get_or_compile_special_split_pattern(
     special_tokens: Sequence[str],
 ) -> re.Pattern | None:
     """Return a cached regex that isolates special tokens during pre-tokenisation."""
-    if not special_tokens:
-        return None
-    joined = "|".join(re.escape(token) for token in special_tokens)
+    assert special_tokens is not None
+    sorted_tokens = sorted(special_tokens, key=len, reverse=True)
+    joined = "|".join(re.escape(token) for token in sorted_tokens)
+    # Use capturing group to preserve special tokens when splitting
+    pattern = f"({joined})"
     key = (joined, tuple(special_tokens))
-    return _COMPILED_SPECIAL_SPLIT_PATTERNS.setdefault(key, re.compile(joined))
+    return COMPILED_SPECIAL_SPLIT_PATTERNS.setdefault(key, re.compile(pattern))
 
 
 def _collect_pre_token_counts_from_ranges(
@@ -354,10 +356,10 @@ def _collect_pre_token_counts_from_ranges(
 
 def _initialize_worker_regex_cache(special_tokens: Sequence[str], pattern: str) -> None:
     """Cache frequently reused regex objects inside worker processes."""
-    special_split_re = _get_or_compile_special_split_pattern(special_tokens)
-    pattern_re = _get_or_compile_pattern(pattern)
-    _WORKER_REGEX_CACHE["special"] = special_split_re
-    _WORKER_REGEX_CACHE["pattern"] = pattern_re
+    special_split_re = get_or_compile_special_split_pattern(special_tokens)
+    pattern_re = get_or_compile_pattern(pattern)
+    WORKER_REGEX_CACHE["special"] = special_split_re
+    WORKER_REGEX_CACHE["pattern"] = pattern_re
 
 
 def _process_range_for_pretokenization(
@@ -370,8 +372,8 @@ def _process_range_for_pretokenization(
         data = f.read(end - start).decode("utf-8", errors="ignore")
 
     pre_tokens: Counter[bytes] = Counter()
-    special_split_re = _WORKER_REGEX_CACHE["special"]
-    pattern_re = _WORKER_REGEX_CACHE["pattern"]
+    special_split_re = WORKER_REGEX_CACHE["special"]
+    pattern_re = WORKER_REGEX_CACHE["pattern"]
     assert pattern_re is not None
 
     segments = special_split_re.split(data) if special_split_re else [data]

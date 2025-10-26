@@ -114,3 +114,5 @@ Some longest tokens look strange, but the training data actually contains vocab 
 (b) The tokenizers trained on TinyStories and OWT are different. The vocabularies and merges depend on the training data's specific patterns.
 
 ## tokenizer
+
+[tokenizer](cs336_basics/tokenizer.py)
