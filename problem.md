@@ -116,3 +116,51 @@ Some longest tokens look strange, but the training data actually contains vocab 
 ## tokenizer
 
 [tokenizer](cs336_basics/tokenizer.py)
+
+## tokenizer_experiments
+
+(a) (b)
+
+```shell
+> python -m cs336_basics.tokenizer_experiments
+TS sample with TS tokenizer:  [118, 868, 500, 507, 266, 324, 616, 372, 263, 917, 473]
+tokenizer's compression ratio: 3.73
+TS sample with OWT tokenizer:  [118, 803, 699, 414, 284, 309, 11045, 288, 262, 7763, 3576]
+tokenizer's compression ratio: 3.73
+---
+OWT sample with OWT tokenizer:  [77, 4103, 2155, 87, 4205, 5365, 45, 12000, 47, 752, 331, 1136, 548, 3321, 19169, 8095, 382, 284, 309, 2595, 352, 627, 6708, 45]
+tokenizer's compression ratio: 3.38
+OWT sample with TS tokenizer:  [118, 803, 699, 414, 284, 309, 11045, 288, 262, 7763, 3576]
+tokenizer's compression ratio: 2.45
+```
+
+If using TinyStory tokenizer with OpenWebText sample, the compression ratio drops from 3.38 to 2.45, which means that on the context of TinyStory, some vocab are merged more aggressively than OWT.
+
+(c)
+
+```shell
+File Size Analysis:
+  File size on disk: 22,502,601 bytes (21.46 MB)
+  UTF-8 encoded size: 22,502,601 bytes (21.46 MB)
+  Character count: 22,493,387 characters
+  UTF-8 / File size ratio: 1.0000
+  Average bytes per character: 1.0004
+
+Estimation for 825 GB text file:
+  If file size = 825 GB on disk
+  Estimated UTF-8 bytes = 825 GB × 1.0000
+                        = 825.00 GB
+                        = 885,837,004,800 bytes
+============================================================
+Tokenization Performance:
+  Validation data: 22,502,601 bytes
+
+  TinyStories Tokenizer:
+    Time: 34.28s  |  Speed: 656,409.30 bytes/s
+    Est. for 825GB: 1,349,519.28s (374.87h)
+
+  OWT Tokenizer:
+    Time: 34.51s  |  Speed: 652,048.39 bytes/s
+    Est. for 825GB: 1,358,544.89s (377.37h)
+============================================================
+```
