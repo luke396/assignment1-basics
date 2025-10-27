@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from functools import partial
@@ -33,27 +34,39 @@ WORKER_REGEX_CACHE: dict[str, re.Pattern | None] = {}
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LOG_PATH = Path(__file__).resolve().parent / "bpe_training.log"
-_LOG_FILE_SETUP_DONE = False
 
+def _setup_logging(log_path: Path | str | None = None) -> None:
+    """Configure logger to write to stdout (and optionally a file)."""
+    if logger.handlers:
+        return
 
-def _ensure_file_logging(log_path: Path | str | None = None) -> Path:
-    """Ensure module logger writes INFO+ messages to a persistent file."""
-    global _LOG_FILE_SETUP_DONE
-    resolved_path = Path(log_path) if log_path else DEFAULT_LOG_PATH
-    if _LOG_FILE_SETUP_DONE:
-        return resolved_path
-
-    resolved_path.parent.mkdir(parents=True, exist_ok=True)
-    handler = logging.FileHandler(resolved_path, mode="a", encoding="utf-8")
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
     logger.setLevel(logging.INFO)
-    logger.propagate = False
-    _LOG_FILE_SETUP_DONE = True
-    logger.info("File logging initialized at %s", resolved_path)
-    return resolved_path
+    formatter = logging.Formatter("%(asctime)s %(levelname)s: %(message)s")
+
+    console = logging.StreamHandler(sys.stdout)
+    console.setFormatter(formatter)
+    logger.addHandler(console)
+
+    if log_path:
+        log_path_obj = Path(log_path)
+        log_path_obj.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+
+def _artifact_paths(
+    input_path: str | os.PathLike[str],
+    vocab_size: int,
+    output_dir: str | os.PathLike[str] | None = None,
+) -> tuple[Path, Path]:
+    """Return the vocab/merge artifact file paths for a dataset."""
+    base_path = Path(input_path)
+    dataset_name = base_path.stem
+    out_directory = Path(output_dir) if output_dir else base_path.parent
+    vocab_out = out_directory / f"tokenizer_vocab_{dataset_name}_{vocab_size}.json"
+    merges_out = out_directory / f"tokenizer_merges_{dataset_name}_{vocab_size}.json"
+    return vocab_out, merges_out
 
 
 def find_chunk_boundaries(
@@ -109,8 +122,13 @@ def train_bpe(
     num_workers: int | None = None,
     pattern: str = PATTERN,
     save: bool = False,
+    output_dir: str | os.PathLike[str] | None = None,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """Train a simple BPE vocabulary from the provided text file.
+
+    Note:
+        This function expects logging to be configured by the caller if logging
+        output is desired.
 
     Args:
         input_path: Path to the training corpus (UTF-8 encoded).
@@ -120,15 +138,15 @@ def train_bpe(
         num_workers: Optional worker count for multiprocessing.  Defaults to
             the CPU count, but never exceeds the number of chunks available.
         pattern: Regular expression used for pre-tokenisation.
-        save: Whether to save the tokenizer as ``tokenizer_vocab.json`` and
-            ``tokenizer_merges.json`` in the same directory as the input file.
+        save: Whether to save the tokenizer artifacts.
+        output_dir: Directory where tokenizer artifacts will be saved.
+            Defaults to the same directory as the input file.
 
     Returns:
         A tuple ``(vocab, merges)`` where:
             * ``vocab`` maps token indices to their byte representations.
             * ``merges`` captures the ordered sequence of byte pair merges.
     """
-    _ensure_file_logging()
     resolved_special_tokens = _normalize_special_tokens(special_tokens)
 
     requested_chunks = _effective_worker_count(num_workers)
@@ -226,12 +244,7 @@ def train_bpe(
     merges = [(vocab_list[i], vocab_list[j]) for i, j in merged_index_pairs]
 
     if save:
-        base_path = Path(input_path)
-        dataset_name = base_path.stem  # Extract filename without extension
-        vocab_out = base_path.parent / f"tokenizer_vocab_{dataset_name}_{vocab_size}.json"
-        merges_out = (
-            base_path.parent / f"tokenizer_merges_{dataset_name}_{vocab_size}.json"
-        )
+        vocab_out, merges_out = _artifact_paths(input_path, vocab_size, output_dir)
 
         vocab_payload = _format_vocab(vocab)
         merges_payload = _format_merges(merges)
@@ -526,47 +539,70 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Train BPE tokenizer")
     parser.add_argument(
+        "--input-path",
+        type=str,
+        help="Path to training corpus (takes precedence over --dataset)",
+    )
+    parser.add_argument(
         "--dataset",
         type=str,
         choices=list(DATASET_CONFIGS.keys()),
-        default="tinystories_valid",
-        help="Dataset to use for training",
+        help="Predefined dataset name",
     )
     parser.add_argument(
         "--vocab-size",
         type=int,
-        default=None,
-        help="Vocabulary size (defaults to dataset-specific value if not specified)",
+        help="Vocabulary size (required if using --input-path)",
     )
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=None,
-        help="Number of workers for multiprocessing",
+        help="Number of workers for multiprocessing (default: auto)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        help="Directory for saving tokenizer artifacts (default: same as input)",
     )
     parser.add_argument(
         "--no-save",
         action="store_true",
-        help="Do not save the tokenizer files",
+        help="Skip saving tokenizer files",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        help="Log file path (default: stdout only)",
     )
 
     args = parser.parse_args()
 
-    config = DATASET_CONFIGS[args.dataset]
-    vocab_size = args.vocab_size or config["default_vocab_size"]
+    if args.input_path:
+        input_path = args.input_path
+        if not args.vocab_size:
+            parser.error("--vocab-size is required when using --input-path")
+        vocab_size = args.vocab_size
+    elif args.dataset:
+        config = DATASET_CONFIGS[args.dataset]
+        input_path = config["path"]
+        vocab_size = args.vocab_size or config["default_vocab_size"]
+    else:
+        parser.error("Either --input-path or --dataset must be specified")
 
+    _setup_logging(args.log_file)
     logger.info(
-        "Training BPE tokenizer: dataset=%s, vocab_size=%d, num_workers=%s",
-        args.dataset,
+        "Training BPE: input=%s, vocab_size=%d, workers=%s",
+        input_path,
         vocab_size,
-        args.num_workers,
+        args.num_workers or "auto",
     )
 
     bpe_result = train_bpe(
-        input_path=config["path"],
+        input_path=input_path,
         vocab_size=vocab_size,
         num_workers=args.num_workers,
         save=not args.no_save,
+        output_dir=args.output_dir,
     )
 
     print_bpe_result(bpe_result=bpe_result)
