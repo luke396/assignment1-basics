@@ -164,3 +164,20 @@ Tokenization Performance:
     Est. for 825GB: 1,358,544.89s (377.37h)
 ============================================================
 ```
+
+After using lru_cache and optimizing the `_bpe_encode_uncached` using double linked-list and min-heap, we get the improved performance:
+
+```shell
+============================================================
+Tokenization Performance:
+  Validation data: 22,502,601 bytes
+
+  TinyStories Tokenizer:
+    Time: 30.45s  |  Speed: 739,024.99 bytes/s
+    Est. for 825GB: 1,198,656.36s (332.96h)
+
+  OWT Tokenizer:
+    Time: 29.81s  |  Speed: 754,822.37 bytes/s
+    Est. for 825GB: 1,173,570.15s (325.99h)
+============================================================
+```
