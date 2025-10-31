@@ -247,6 +247,6 @@ if __name__ == "__main__":
         merges_filepath="data/tokenizer_merges_owt_train_32000.json",
     )
 
-    # qab(ts_tokenizer, owt_tokenizer)
+    qab(ts_tokenizer, owt_tokenizer)
     qc(ts_tokenizer, owt_tokenizer)
-    # qd(ts_tokenizer, owt_tokenizer)
+    qd(ts_tokenizer, owt_tokenizer)

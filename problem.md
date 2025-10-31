@@ -83,7 +83,7 @@ After optimizing `apply_merge` to use sub_tokens instead of whole tokens, optimi
 
 ## train_bpe_expts_owt
 
-(a) This is a really big dataset. My local machine with 16GB RAM can't handle it. Some optimizations like streaming pre-tokens are possible, but the implementation is really complex, so I ran it on a cloud server with more RAM.
+(a) This dataset is extremely large. My local machine with 16GB RAM cannot handle it. While optimizations such as streaming pre-tokens are possible, the implementation complexity is significant, so I executed the training on a cloud server with additional RAM.
 
 ```shell
 Top 20 longest tokens (by bytes):
@@ -109,9 +109,9 @@ Top 20 longest tokens (by bytes):
   20) id=10287, len=16 bytes, value=b' recommendations' (hex=207265636f6d6d656e646174696f6e73)
 ```
 
-Some longest tokens look strange, but the training data actually contains vocab like '---------------------------', so this is reasonable.
+Some of the longest tokens appear unusual, but the training data actually contains vocabulary like '---------------------------', making these results reasonable.
 
-(b) The tokenizers trained on TinyStories and OWT are different. The vocabularies and merges depend on the training data's specific patterns.
+(b) The tokenizers trained on TinyStories and OWT differ significantly. The vocabularies and merge operations depend on the specific patterns present in the training data.
 
 ## tokenizer
 
@@ -134,7 +134,7 @@ OWT sample with TS tokenizer:  [118, 803, 699, 414, 284, 309, 11045, 288, 262, 7
 tokenizer's compression ratio: 2.45
 ```
 
-If using TinyStory tokenizer with OpenWebText sample, the compression ratio drops from 3.38 to 2.45, which means that on the context of TinyStory, some vocab are merged more aggressively than OWT.
+When using the TinyStories tokenizer with an OpenWebText sample, the compression ratio drops from 3.38 to 2.45. This indicates that in the TinyStories context, certain vocabulary pairs are merged more aggressively compared to OWT.
 
 (c)
 
@@ -165,7 +165,7 @@ Tokenization Performance:
 ============================================================
 ```
 
-After using lru_cache and optimizing the `_bpe_encode_uncached` using double linked-list and min-heap, we get the improved performance:
+After applying `lru_cache` and optimizing `_bpe_encode_uncached` using a doubly linked list and min-heap, the performance improved significantly:
 
 ```shell
 ============================================================
@@ -181,3 +181,5 @@ Tokenization Performance:
     Est. for 825GB: 1,173,570.15s (325.99h)
 ============================================================
 ```
+
+(d) In this implementation, we encode the dataset and store it using `uint16`. On my cloud server, the encoding speed is approximately 3 MB/s. The `uint16` data type provides a token ID range of 0-65,535, which is suitable for our text and task. This choice avoids the limitations of `uint8` (range: 0-255) while preventing the storage overhead of `uint32`.
