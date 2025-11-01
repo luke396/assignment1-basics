@@ -1,3 +1,8 @@
+"""CS336 Assignment 1 basics package.
+
+This package provides implementations for tokenization and related utilities.
+"""
+
 import importlib.metadata
 
 try:
