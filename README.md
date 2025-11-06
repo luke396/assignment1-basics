@@ -188,6 +188,102 @@ Tokenization Performance:
 
 ## 3. Transformer Language Model Architecture
 
+Linear, Embedding, RMSNorm, SwiGLU feed-forward network, Softmax, scaled_dot_product_attention, multihead_self_attention, TransformerBlock, transformer_lm
+
+[blocks](cs336_basics/blocks.py)
+
+### transformer_accounting
+
+(a) Parameters count:
+
+- Embedding weight: num_embeddings x embedding_dim
+- Linear: output x input
+- RMSNorm: d_model
+- SwiGLU: w1,w3: d_ff x d_model, w2: d_model x d_ff
+  - total: 2 x d_ff x d_model + d_model x d_ff
+    - 3 x d_ff x d_model
+- TransformerBlock
+  - MultiheadSelfAtten - attn
+    - Linear, q, k, v, out: 4 x d_model x d_model
+  - SwiGLU - ffn
+    - 3 x d_ff x d_model
+  - RMSNorm - ln1, ln2
+    - 2 x d_model
+  - total: 4 x d_model x d_model + 3 x d_ff x d_model + 2 x d_model
+
+Total with n layers Transformer base: vocab_size x embedding_dim + n x (4 x d_model x d_model + 3 x d_ff x d_model + 2 x d_model) + d_model + vocab_size x d_model.
+
+Most of the time, we assume d_model = embedding_dim, so we can simplify it to: `2 x vocab_size x d_model + n x (4 x d_model x d_model + 3 x d_ff x d_model + 2 x d_model) + d_model`.
+
+```shell
+Total parameters: 2127057600
+Total parameters calculated: 2127057600, about 2.13B
+For single-precision floating point, FP32 - 4 bytes, the memory requirement is: 8114.08 MB, about 7.92 GB
+```
+
+(b) FLOPs
+
+FLOPs calculation, taking into account all matrix multiplications, mainly the computation of an n-layer transformer block and the final Linear layer.
+
+For the transformer block, the main computations are the multi-head attention plus SwiGLU. Among these, the magnitudes of RMSNorm and ROPE are relatively small compared with others and can be ignored.
+
+- Linear - 2 x … x d_in x d_out
+- scaled dot product
+  - 4 x … x s_q x s_k x d_k
+- MultiheadSelfAttention
+  - Linear - 4 x (2 x batch x seq x d_model x d_model)
+    - 8 x batch x seq x d_model x d_model
+  - atten dot product - 4 x batch x s_q x s_k x d_k, s_q = s_k,
+    - 4 x batch x head x s_q x s_q x d_k
+    - 4 x batch x d_model x s_q x s_q
+  - total - 8 x batch x seq x d_model x d_model+ 4 x batch x d_model x s_q x s_q
+    - batch x seq x d_model x (8 x d_model + 4 x seq)
+- SwiGLU
+  - 6 x batch x seq x d_model x d_ff
+- Transformer block
+  - batch x seq x d_model x (8 x d_model + 4 x seq) + 6 x batch x seq x d_model x d_ff
+  - batch x seq x d_model x (8 x d_model + 4 x seq + 6 x d_ff)
+- total `n x [batch x seq x d_model x (8 x d_model + 4 x seq + 6 x d_ff)] + 2 x batch x seq x d_model x vocab_size`
+
+(c) Based on the FLOPs calculation above, the most significant part is the transformer blocks; within the blocks, the most significant part is multi-head attention.
+
+```shell
+For single batch with seq = context_length, for one token, the multiattn FLOPs: 0.03 GFLOPs,  ffn FLOPs: 0.06 GFLOPs,  n_layers FLOPs: 4.25 GFLOPs,  final linear FLOPs: 0.16 GFLOPs,  Total seq FLOPs: 4.51 TFLOPs
+Percentage of n_layers FLOPs: 0.9635, final linear FLOPs: 0.0365
+Small model FLOPs analysis:
+For single batch with seq = context_length, for one token, the multiattn FLOPs: 0.01 GFLOPs,  ffn FLOPs: 0.03 GFLOPs,  n_layers FLOPs: 1.79 GFLOPs,  final linear FLOPs: 0.08 GFLOPs,  Total seq FLOPs: 1.92 TFLOPs
+Percentage of n_layers FLOPs: 0.9587, final linear FLOPs: 0.0413
+```
+
+(d)
+
+```shell
+Small model FLOPs analysis:
+For single batch with seq = context_length, for one token, the multiattn FLOPs: 0.01 GFLOPs,  ffn FLOPs: 0.03 GFLOPs,  n_layers FLOPs: 1.79 GFLOPs,  final linear FLOPs: 0.08 GFLOPs,  Total seq FLOPs: 1.92 TFLOPs
+Percentage of n_layers FLOPs: 0.9587, final linear FLOPs: 0.0413
+Medium model FLOPs analysis:
+For single batch with seq = context_length, for one token, the multiattn FLOPs: 0.01 GFLOPs,  ffn FLOPs: 0.04 GFLOPs,  n_layers FLOPs: 2.49 GFLOPs,  final linear FLOPs: 0.10 GFLOPs,  Total seq FLOPs: 2.66 TFLOPs
+Percentage of n_layers FLOPs: 0.9603, final linear FLOPs: 0.0397
+Large model FLOPs analysis:
+For single batch with seq = context_length, for one token, the multiattn FLOPs: 0.02 GFLOPs,  ffn FLOPs: 0.05 GFLOPs,  n_layers FLOPs: 3.24 GFLOPs,  final linear FLOPs: 0.13 GFLOPs,  Total seq FLOPs: 3.45 TFLOPs
+Percentage of n_layers FLOPs: 0.9618, final linear FLOPs: 0.0382
+XLarge model FLOPs analysis:
+For single batch with seq = context_length, for one token, the multiattn FLOPs: 0.03 GFLOPs,  ffn FLOPs: 0.06 GFLOPs,  n_layers FLOPs: 4.25 GFLOPs,  final linear FLOPs: 0.16 GFLOPs,  Total seq FLOPs: 4.51 TFLOPs
+Percentage of n_layers FLOPs: 0.9635, final linear FLOPs: 0.0365
+```
+
+Based on the above, as model size increases, the percentage of n_layers FLOPs increases more than final linear FLOPs.
+
+(e)
+
+```shell
+Context length 16K FLOPs analysis:
+For single batch with seq = context_length, for one token, the multiattn FLOPs: 0.13 GFLOPs,  ffn FLOPs: 0.06 GFLOPs,  n_layers FLOPs: 8.97 GFLOPs,  final linear FLOPs: 0.16 GFLOPs,  Total seq FLOPs: 149.52 TFLOPs
+Percentage of n_layers FLOPs: 0.9824, final linear FLOPs: 0.0176
+```
+
+For 16K context length, the multi-head attention FLOPs increases significantly, but the ffn FLOPs remains relatively stable, leading to a substantial increase in total FLOPs. The percentage of n_layers FLOPs also increases, while the final linear FLOPs percentage decreases.
+
 ## 4. Training a Transformer LM
 
 ## 5. Training loop

@@ -13,6 +13,6 @@ repos:
     hooks:
       - id: targeted-pytest
         name: Run targeted pytest suite
-        entry: uv run pytest tests/test_train_bpe.py tests/test_tokenizer.py
+        entry: uv run pytest tests/test_train_bpe.py tests/test_tokenizer.py tests/test_model.py
         language: system
         pass_filenames: false

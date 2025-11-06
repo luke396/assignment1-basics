@@ -45,7 +45,11 @@ addopts = "-s"
 
 [tool.ruff]
 line-length = 88
-extend-exclude = ["tests", "cs336_basics/pretokenization_example.py"]
+extend-exclude = [
+    "tests",
+    "cs336_basics/pretokenization_example.py",
+    "cs336_basics/blocks_experiments.py",
+]
 
 [tool.ruff.lint.extend-per-file-ignores]
 # Also ignore `E402` in all `__init__.py` files.
@@ -56,4 +60,4 @@ extend-exclude = ["tests", "cs336_basics/pretokenization_example.py"]
 [tool.ruff.lint]
 select = ["ALL"]
 extend-select = ["UP"]
-ignore = ["F722", "D203", "D213", "S101", "COM812"]
+ignore = ["F722", "D203", "D213", "S101", "COM812", "T201"]
