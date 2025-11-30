@@ -13,6 +13,6 @@ repos:
     hooks:
       - id: targeted-pytest
         name: Run targeted pytest suite
-        entry: uv run pytest tests/test_train_bpe.py tests/test_tokenizer.py tests/test_model.py tests/test_nn_utils.py tests/test_optimizer.py
+        entry: uv run pytest # should pass all existing tests!
         language: system
         pass_filenames: false
