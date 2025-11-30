@@ -8,7 +8,11 @@ import torch
 
 
 def data_loading(
-    x: np.ndarray, batch_size: int, context_length: int, device: str
+    x: np.ndarray,
+    batch_size: int,
+    context_length: int,
+    device: str,
+    rng: np.random.Generator | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Sample a batch of input sequences and next-token targets.
 
@@ -17,6 +21,7 @@ def data_loading(
         batch_size: Number of sequences to sample.
         context_length: Length of each sampled sequence.
         device: Torch device string to place the returned tensors on.
+        rng: Optional numpy random number generator. If None, a new one will be created.
 
     Returns:
         Tuple of (inputs, targets) with shape (batch_size, context_length).
@@ -27,7 +32,7 @@ def data_loading(
         msg = "Dataset must be longer than the context length."
         raise ValueError(msg)
 
-    rng = np.random.default_rng()
+    rng = np.random.default_rng() if rng is None else rng
     start_indices = rng.integers(0, max_start, size=batch_size)
     inputs = np.stack([x[i : i + context_length] for i in start_indices])
     targets = np.stack([x[i + 1 : i + context_length + 1] for i in start_indices])
