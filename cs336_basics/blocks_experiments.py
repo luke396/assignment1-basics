@@ -63,7 +63,7 @@ def _analyze_flops(config):
     flops_multiattn = (
         8 * config["d_model"] ** 2 + 4 * config["d_model"] * config["context_length"]
     )
-    flops_ffn = 6 * config["d_model"] * config["d_ff"]
+    flops_ffn = 4 * config["d_model"] * config["d_ff"]
     flops_n_layers = config["num_layers"] * (flops_multiattn + flops_ffn)
     flops_final_linear = 2 * config["d_model"] * config["vocab_size"]
     total_seq_flops = (flops_n_layers + flops_final_linear) * config["context_length"]

@@ -260,14 +260,16 @@ def scaled_dot_product_attention(
         Attention output tensor of shape (batch_size, ..., seq_len_q, d_v).
 
     """
+    # Scaled dot-product for numerical stability
     d_k = k.shape[-1]
     scores = einsum(q, k, "... s_q d_k, ... s_k d_k -> ... s_q s_k") / torch.sqrt(
         torch.tensor(d_k, dtype=q.dtype, device=q.device)
     )
 
     if mask is not None:
-        # Convert boolean mask to additive mask: True -> 0.0, False -> -inf
-        neg_inf = torch.tensor(float("-inf"), dtype=scores.dtype, device=scores.device)
+        neg_inf = torch.tensor(
+            float("-inf"), dtype=scores.dtype, device=scores.device
+        )  # Convert boolean mask to additive mask: True -> 0.0, False -> -inf
         scores = torch.where(mask, scores, neg_inf)
 
     attention_weights = softmax(scores, dim=-1)

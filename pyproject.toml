@@ -49,6 +49,7 @@ extend-exclude = [
     "tests",
     "cs336_basics/pretokenization_example.py",
     "cs336_basics/blocks_experiments.py",
+    "cs336_basics/training_utility_experiments.py"
 ]
 
 [tool.ruff.lint.extend-per-file-ignores]

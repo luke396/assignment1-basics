@@ -286,6 +286,83 @@ For 16K context length, the multi-head attention FLOPs increases significantly, 
 
 ## 4. Training a Transformer LM
 
+### adamwAccoutning
+
+(a)
+
+- Model parameters:
+  - Embedding: $V \times D$
+  - Transformer Block(per layer):
+    - Q K V output proj: $4\times D^{2}$
+    - FFN($W_{1},W_{2}$): $D\times 4D, 4D \times D=8D^{2}$
+    - RMSNorm(2): $2\times D$ (ignore)
+    - Total $\approx 12D^{2}$
+  - Output Head: $V\times D$(assume not share the weight)
+  - Final RMSNorm: $D$
+  - Total $N_{\text{params}} \approx 12 N D^{2}+2VD$
+- Gradient - totally same as parameter,
+  - Total $N_{\text{grads}} \approx 12 N D^{2}+2VD$
+- optimizer status
+  - Momentum, Variance - same as parameter
+  - Total $N_{\text{optm}} \approx 2 \times (12 N D^{2}+2VD)$
+- Total static $N_{\text{static}}=N_{\text{params}}+N_{\text{grads}}+N_{\text{opt}}=4 \times(12ND^{2}+2VD)$
+- Activation - store which need to be used in back propagation
+  - Transformer Block(per layer)
+    - RMSMorms(2): store input - $2\times B\times L\times D$
+    - Multi Head Attention:
+      - Q K V proj - store input and output - $(B\times L\times D)+3\times(B\times L\times D)$
+      - Q^T K matrix multiply - store Q and K(has included)
+      - Softmax - store output(probability), input has included - $B\times H\times L^{2}$
+      - Weighted Sum - Probability(included), V(included)
+      - Output Projection - store input - $B\times L\times D$
+    - FFN
+      - W1 Multiply - store input - $B\times L\times D$
+      - SiLU - store input - $B\times L\times 4D$
+      - W2 Multiply - store input $B\times L\times 4D$
+    - Total
+      - Linear term $BLD$ - $16\times B\times L\times D$
+      - Second term $B\times L\times H^{2}$
+  - Other (Non-layer)
+    - Final RMSNorm - store input $B\times L\times D$
+    - Output Embedding - store input $B\times L\times D$
+    - Cross Entropy - store logits $B\times L\times V$
+  - Total $N_{\text{act}} = N\times(16 \times B \times L \times D+ B\times H\times L^{2})+2\times B\times L\times D+ B\times L\times V$
+- Total = $N_{\text{static}}+N_{\text{act}}=4(12ND^{2}+2VD) +N(16 B  L D+ BH L^{2})+BLV + 2BLD$
+  - for float32 - $M_{\text{total}}=4N_{\text{total}} \text{bytes}$
+
+(b)
+
+```shell
+f32memory (GB) = 10.48 * batch_size + 26.17, means batch_size increases 1, the memory increases by 10.48 GB
+For batch size 1, estimated float32 memory usage: 36.65 GB
+For batch size 4, estimated float32 memory usage: 68.10 GB
+For batch size 6, estimated float32 memory usage: 89.07 GB
+For batch size 8, estimated float32 memory usage: 110.04 GB
+```
+
+(c)
+
+FLOPS for one step of AdamW:
+
+- update $m$: $m=\beta_{1} m_{t - 1} +(1-\beta_{1})g$ (3 FLOPs: mul, add, mul)
+- update $v$: $v=\beta_{2} v_{t - 1} +(1-\beta_{2})g^{2}$ (4 FLOPs: mul(g x g), mul, add, mul)
+- Learning rate update: $\alpha_{t}=\alpha  \frac{{\sqrt{ 1-\beta_{2}^{t} }}}{1-\beta_{1}^{t}}$, pure scalar, ignore
+- update parameters: $\theta=\theta-\alpha_{t}\left(\frac{\hat{m}_{t}}{\sqrt{ \hat{v}_{t} }+\epsilon }\right)$ (5FLOPs: sqrt, add eps, div, mul, sub)
+- weight decay: $\theta = \theta-\alpha \eta\theta$(2FLOPs, mul- $\alpha,\eta$ is constant, sub)
+- total -14FLOPs
+
+(d)
+
+```shell
+f32memory (GB) = 10.48 * batch_size + 26.17, means batch_size increases 1, the memory increases by 10.48 GB
+For batch size 1, estimated float32 memory usage: 36.65 GB
+For batch size 4, estimated float32 memory usage: 68.10 GB
+For batch size 6, estimated float32 memory usage: 89.07 GB
+For batch size 8, estimated float32 memory usage: 110.04 GB
+For batch size 1024, for one token, the multiattn FLOPs: 0.03 GFLOPs,  ffn FLOPs: 0.04 GFLOPs,  n_layers FLOPs: 3.26 GFLOPs,  final linear FLOPs: 0.16 GFLOPs,  Total seq FLOPs: 3590.86 TFLOPs
+Total training time estimate (days) for batch size 1024 and 400k steps on single A100 GPU: 1705.06 days
+```
+
 ## 5. Training loop
 
 ## 6. Generating text
