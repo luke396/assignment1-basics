@@ -12,7 +12,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
-from .bpe import PATTERN, get_or_compile_pattern, get_or_compile_special_split_pattern
+from .bpe_shared import (
+    PATTERN,
+    get_or_compile_pattern,
+    get_or_compile_special_split_pattern,
+)
 
 
 class Tokenier:
@@ -293,7 +297,7 @@ if __name__ == "__main__":
         vocab_filepath="data/tokenizer_vocab_owt_train_32000.json",
         merges_filepath="data/tokenizer_merges_owt_train_32000.json",
     )
-    print(  # noqa: T201
+    print(
         t.encode(
             (
                 "Cassie Lintz settles down for the night with her daughters Kendal, "

@@ -15,16 +15,18 @@ from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, Final, TypeAlias
 
-import regex as re
-
+from .bpe_shared import (
+    PATTERN,
+    get_or_compile_pattern,
+    get_or_compile_special_split_pattern,
+)
 from .utility import print_bpe_result
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
-PATTERN: Final[str] = (
-    r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-)
+    import regex as re
+
 ENDOFTEXT: Final[str] = "<|endoftext|>"
 
 ChunkRange: TypeAlias = tuple[int, int]
@@ -32,8 +34,6 @@ MergePair: TypeAlias = tuple[int, int]
 MergeHeapEntry: TypeAlias = tuple[int, tuple[int, ...], tuple[int, ...], int, int, int]
 TokenIdSplit: TypeAlias = list[int]
 
-COMPILED_TOKEN_PATTERNS: dict[str, re.Pattern] = {}
-COMPILED_SPECIAL_SPLIT_PATTERNS: dict[tuple[str, tuple[str, ...]], re.Pattern] = {}
 WORKER_REGEX_CACHE: dict[str, re.Pattern | None] = {}
 SPECIAL_TOKEN_SET: set[str] = set()
 
@@ -356,24 +356,6 @@ def _effective_worker_count(
     if num_chunks is not None:
         capped = min(capped, max(1, num_chunks))
     return max(1, capped)
-
-
-def get_or_compile_pattern(pattern: str) -> re.Pattern:
-    """Return a cached regex pattern for the provided pattern string."""
-    return COMPILED_TOKEN_PATTERNS.setdefault(pattern, re.compile(pattern))
-
-
-def get_or_compile_special_split_pattern(
-    special_tokens: Sequence[str],
-) -> re.Pattern | None:
-    """Return a cached regex that isolates special tokens during pre-tokenisation."""
-    assert special_tokens is not None
-    sorted_tokens = sorted(special_tokens, key=len, reverse=True)
-    joined = "|".join(re.escape(token) for token in sorted_tokens)
-    # Use capturing group to preserve special tokens when splitting
-    pattern = f"({joined})"
-    key = (joined, tuple(special_tokens))
-    return COMPILED_SPECIAL_SPLIT_PATTERNS.setdefault(key, re.compile(pattern))
 
 
 def _collect_pre_token_counts_from_ranges(

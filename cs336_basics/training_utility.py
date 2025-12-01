@@ -1,12 +1,17 @@
-"""For training a transformer LM - Section 4."""
+"""Training utilities for Transformer LMs."""
 
 from __future__ import annotations
 
 import math
+import typing
 from collections.abc import Callable, Iterable
 from typing import Any
 
+import numpy as np
 import torch
+
+if typing.TYPE_CHECKING:
+    import os
 
 
 def cross_entropy(inputs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -176,3 +181,53 @@ def gradient_clipping(
         scale = max_l2_norm / (total_norm + eps)
         for g in grads:
             g.mul_(scale)
+
+
+def data_loading(
+    x: np.ndarray,
+    batch_size: int,
+    context_length: int,
+    device: str,
+    rng: np.random.Generator | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample a batch of input sequences and next-token targets."""
+    max_start = len(x) - context_length
+    if max_start <= 0:
+        msg = "Dataset must be longer than the context length."
+        raise ValueError(msg)
+
+    rng = np.random.default_rng() if rng is None else rng
+    start_indices = rng.integers(0, max_start, size=batch_size)
+    inputs = np.stack([x[i : i + context_length] for i in start_indices])
+    targets = np.stack([x[i + 1 : i + context_length + 1] for i in start_indices])
+
+    inputs_tensor = torch.as_tensor(inputs, dtype=torch.long, device=device)
+    targets_tensor = torch.as_tensor(targets, dtype=torch.long, device=device)
+    return inputs_tensor, targets_tensor
+
+
+def save_checkpoint(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    iteration: int,
+    out: str | os.PathLike | typing.BinaryIO | typing.IO[bytes],
+) -> None:
+    """Save model and optimizer state to a checkpoint file."""
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "iteration": iteration,
+    }
+    torch.save(checkpoint, out)
+
+
+def load_checkpoint(
+    src: str | os.PathLike | typing.BinaryIO | typing.IO[bytes],
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+) -> int:
+    """Load model and optimizer state from a checkpoint file."""
+    checkpoint = torch.load(src)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    return checkpoint["iteration"]
