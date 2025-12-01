@@ -46,6 +46,8 @@ class Tokenier:
         }
         # inverse map for bytes to token ID, for O(1) lookup
         self.bytes_to_id: dict[bytes, int] = {v: k for k, v in vocab.items()}
+        eot_token_bytes = b"<|endoftext|>"
+        self.eot_token_id: int | None = self.bytes_to_id.get(eot_token_bytes)
         # only cache pretoken with immutable tuple
         self._bpe_encode_cached = lru_cache(maxsize=30000)(
             lambda pretoken: tuple(self._bpe_encode_uncached(pretoken)),

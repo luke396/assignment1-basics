@@ -10,8 +10,12 @@ from typing import Any
 import numpy as np
 import torch
 
+from cs336_basics.blocks import softmax
+
 if typing.TYPE_CHECKING:
     import os
+
+    from cs336_basics.tokenizer import Tokenier
 
 
 def cross_entropy(inputs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -231,3 +235,89 @@ def load_checkpoint(
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     return checkpoint["iteration"]
+
+
+def generate(  # noqa: PLR0913
+    model: torch.nn.Module,
+    tokenizer: Tokenier,
+    prompt: str,
+    max_new_tokens: int,
+    temperature: float = 1.0,
+    top_p: float = 1.0,
+    rng: torch.Generator | None = None,
+) -> str:
+    """Generate text with temperature and top-p (nucleus) sampling.
+
+    Args:
+        model: Language model that maps token ids
+            to logits of shape (batch, seq, vocab).
+        tokenizer: Tokenizer providing encode/decode and an ``eot_token_id``.
+        prompt: Seed text to condition on.
+        max_new_tokens: Maximum number of tokens to sample.
+        temperature: Softmax temperature (>0); larger flattens, smaller sharpens.
+        top_p: Nucleus threshold in (0, 1];
+            keep the smallest prefix whose mass ≥ ``top_p``.
+        rng: Optional torch.Generator for reproducible sampling.
+
+    Returns:
+        The decoded text for the newly generated tokens (prompt excluded).
+
+    """
+    if temperature <= 0.0:
+        msg = "Temperature must be positive."
+        raise ValueError(msg)
+    if not (0 < top_p <= 1):
+        msg = "top_p must be in the range (0, 1]."
+        raise ValueError(msg)
+
+    end_id = tokenizer.eot_token_id
+    if end_id is None:
+        msg = "Tokenizer must provide an eot_token_id for generation."
+        raise ValueError(msg)
+
+    device = next(model.parameters()).device  # same as model parametet's device
+    prompt_tokens = tokenizer.encode(prompt)
+    input_tokens = prompt_tokens.copy()
+    rng = rng if rng is not None else torch.Generator(device=device)
+
+    with torch.no_grad():
+        for _ in range(max_new_tokens):
+            logits = model(
+                torch.as_tensor(
+                    [input_tokens],
+                    device=device,
+                )
+            )  # (batch_size, sequence_len, vocab_size)
+
+            # Temperature scaling
+            probs = softmax(
+                logits[:, -1, :].squeeze(0) / temperature, dim=-1
+            )  # (vocab_size,)
+
+            # Top-p nucleus sampling
+            sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+            cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+
+            # Remove tokens with cumulative probability above the threshold
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1]
+            sorted_indices_to_remove[..., 0] = False
+
+            # Fill removed logits with zeros, and re-normalize
+            sorted_probs = sorted_probs.masked_fill(sorted_indices_to_remove, 0.0)
+            full_probs = torch.zeros_like(probs)
+            full_probs[sorted_indices] = sorted_probs
+            full_probs = full_probs / full_probs.sum()
+
+            next_id = torch.multinomial(
+                full_probs,
+                num_samples=1,
+                generator=rng,
+            ).item()
+            next_id = int(next_id)
+            input_tokens.append(next_id)
+
+            if next_id == end_id:
+                break
+
+    return tokenizer.decode(input_tokens[len(prompt_tokens) :])
