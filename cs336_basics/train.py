@@ -1,8 +1,11 @@
 """Scripts to train models."""
 
 import argparse
-from collections.abc import Generator, Sequence
-from dataclasses import dataclass
+import json
+import time
+from collections import deque
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
@@ -51,6 +54,10 @@ class TrainConfig:
     seed: int = 42
     val_seed: int | None = None
     val_batches: int = 8
+    train_loss_ma_window: int = 100
+    log_dir: str | None = None
+    run_name: str = "run"
+    log_interval: int = 100
 
     @classmethod
     def _build_parser(cls) -> argparse.ArgumentParser:
@@ -190,6 +197,33 @@ class TrainConfig:
             default=cls.val_batches,
             help="Number of validation batches to average per evaluation.",
         )
+        parser.add_argument(
+            "--train-loss-ma-window",
+            type=int,
+            default=cls.train_loss_ma_window,
+            help="Window size for moving-average training loss logging.",
+        )
+        parser.add_argument(
+            "--log-dir",
+            type=str,
+            default=cls.log_dir,
+            help=(
+                "Directory to store experiment logs (CSV/metadata). "
+                "If omitted or empty, logging is disabled."
+            ),
+        )
+        parser.add_argument(
+            "--run-name",
+            type=str,
+            default=cls.run_name,
+            help="Human-readable name for this run; timestamp is appended.",
+        )
+        parser.add_argument(
+            "--log-interval",
+            type=int,
+            default=cls.log_interval,
+            help="How often (in steps) to log and evaluate validation loss.",
+        )
         return parser
 
     @classmethod
@@ -199,54 +233,152 @@ class TrainConfig:
         return cls(**vars(parsed))
 
 
-def batch_generator(
-    data: np.ndarray,
-    batch_size: int,
-    context_length: int,
-    device: str,
-    rng: np.random.Generator | None = None,
-) -> Generator[tuple[torch.Tensor, torch.Tensor], None, None]:
-    """Generate batches of data for training.
+class BatchLoader:
+    """Stateful batch sampler with controllable RNG for reproducibility."""
 
-    Args:
-        data: Numpy array or memmap of the dataset.
-        batch_size: Number of sequences per batch.
-        context_length: Length of each sequence.
-        device: Torch device string to place the returned tensors on.
-        rng: Optional numpy random number generator. If None, a new one will be created.
+    def __init__(
+        self,
+        data: np.ndarray,
+        batch_size: int,
+        context_length: int,
+        device: str,
+        seed: int,
+    ) -> None:
+        """Initialize batch loader.
 
-    Yields:
-        Tuple of (inputs, targets) tensors with shape (batch_size, context_length).
+        Args:
+            data: 1D array of token IDs.
+            batch_size: Number of sequences per batch.
+            context_length: Length of each sequence.
+            device: Torch device string for returned tensors.
+            seed: Seed for the internal RNG.
 
+        """
+        self.data = data
+        self.batch_size = batch_size
+        self.context_length = context_length
+        self.device = device
+        self.seed = seed
+        self.rng = np.random.default_rng(seed)
+
+    def reset(self) -> None:
+        """Reset RNG to the initial seed (useful for deterministic validation)."""
+        self.rng = np.random.default_rng(self.seed)
+
+    def next_batch(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Sample the next batch."""
+        return data_loading(
+            self.data,
+            self.batch_size,
+            self.context_length,
+            self.device,
+            self.rng,
+        )
+
+
+class ExperimentLogger:
+    """Lightweight logger that tracks metrics over steps and wallclock time.
+
+    Writes metadata to ``meta.json`` and metrics to ``metrics.csv`` inside a
+    time-stamped run directory under ``log_dir``.
     """
-    # Stateless wrapper to repeatedly sample batches from memmap-backed data.
-    while True:
-        yield data_loading(data, batch_size, context_length, device, rng)
+
+    def __init__(
+        self, log_dir: str | Path | None, run_name: str, config: TrainConfig
+    ) -> None:
+        """Initialize logger and create run directory/metadata if enabled.
+
+        Args:
+            log_dir: Root directory for run logs; disables logging if falsy.
+            run_name: Human-readable name for the run (timestamp is appended).
+            config: Full training configuration to store in ``meta.json``.
+
+        """
+        if not log_dir:
+            self.enabled = False
+            self.run_dir = None
+            self.metrics_path = None
+            return
+
+        timestamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        self.run_dir = Path(log_dir) / f"{run_name}_{timestamp}"
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+
+        self.metrics_path = self.run_dir / "metrics.csv"
+        meta_path = self.run_dir / "meta.json"
+
+        meta = {
+            "run_name": run_name,
+            "start_time_utc": timestamp,
+            "config": asdict(config),
+        }
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+        header = "step,elapsed_sec,train_loss_ma,val_loss,lr\n"
+        self.metrics_path.write_text(header, encoding="utf-8")
+
+    def log_metrics(
+        self,
+        step: int,
+        elapsed_sec: float,
+        train_loss_ma: float,
+        val_loss: float,
+        lr: float,
+    ) -> None:
+        """Append one metrics row to CSV."""
+        if not self.enabled or self.metrics_path is None:
+            return
+
+        line = f"{step},{elapsed_sec:.3f},{train_loss_ma:.6f},{val_loss:.6f},{lr:.8f}\n"
+        with self.metrics_path.open("a", encoding="utf-8") as f:
+            f.write(line)
 
 
-def train(config: TrainConfig) -> None:
-    """Train a Transformer language model.
-
-    Args:
-        config: Training configuration.
-
-    """
-    # Global seeding for reproducibility.
-    np.random.seed(config.seed)  # noqa: NPY002
-    torch.manual_seed(config.seed)
+def set_global_seeds(seed: int) -> None:
+    """Seed numpy/torch for reproducibility (CPU and CUDA if available)."""
+    np.random.seed(seed)  # noqa: NPY002
+    torch.manual_seed(seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(config.seed)
+        torch.cuda.manual_seed_all(seed)
 
-    train_rng = np.random.default_rng(config.seed)
+
+def validate_config_values(config: TrainConfig) -> None:
+    """Validate config fields that must be positive."""
+    if config.train_loss_ma_window <= 0:
+        msg = "train_loss_ma_window must be positive."
+        raise ValueError(msg)
+    if config.log_interval <= 0:
+        msg = "log_interval must be positive."
+        raise ValueError(msg)
+
+
+def build_data_sources(
+    config: TrainConfig, val_seed: int
+) -> tuple[BatchLoader, BatchLoader]:
+    """Create train and validation batch loaders."""
     train_data = np.memmap(config.train_path, dtype=np.uint16, mode="r")
     validation_data = np.memmap(config.validation_path, dtype=np.uint16, mode="r")
-    train_loader = batch_generator(
-        train_data, config.batch_size, config.context_length, config.device, train_rng
+    train_loader = BatchLoader(
+        train_data,
+        config.batch_size,
+        config.context_length,
+        config.device,
+        seed=config.seed,
     )
+    val_loader = BatchLoader(
+        validation_data,
+        config.batch_size,
+        config.context_length,
+        config.device,
+        seed=val_seed,
+    )
+    return train_loader, val_loader
 
-    # Validation RNG is re-seeded each evaluation for stable batches.
-    val_seed = config.val_seed if config.val_seed is not None else config.seed + 1
 
+def build_model_and_optimizer(
+    config: TrainConfig,
+) -> tuple[TransformerLM, AdamW]:
+    """Instantiate model, positional embedding, and optimizer."""
     rope = RotaryPositionalEmbedding(
         100000.0, config.d_model // config.num_heads, config.context_length
     )
@@ -265,14 +397,81 @@ def train(config: TrainConfig) -> None:
     optimizer = AdamW(
         model.parameters(), lr=config.lr, weight_decay=config.weight_decay
     )
+    return model, optimizer
 
-    start_step = 0
-    if config.resume:
-        start_step = load_checkpoint(config.resume, model, optimizer) + 1
 
-    checkpoint_dir = Path(config.checkpoint_dir) if config.checkpoint_dir else None
-    if checkpoint_dir:
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+def apply_learning_rate(optimizer: AdamW, lr_now: float) -> None:
+    """Set the learning rate for all parameter groups."""
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = lr_now
+
+
+def run_train_step(
+    model: TransformerLM,
+    optimizer: AdamW,
+    train_loader: BatchLoader,
+    config: TrainConfig,
+) -> float:
+    """Run one training step and return the scalar loss."""
+    model.train()
+    inputs, targets = train_loader.next_batch()
+    optimizer.zero_grad()
+    logits = model(inputs)
+    loss = cross_entropy(logits, targets)
+    loss.backward()
+    gradient_clipping(model.parameters(), max_l2_norm=config.max_l2_norm)
+    optimizer.step()
+    return float(loss.item())
+
+
+def run_validation(
+    model: TransformerLM,
+    val_loader: BatchLoader,
+    config: TrainConfig,
+) -> float:
+    """Compute mean validation loss using a deterministic loader."""
+    model.eval()
+    val_loader.reset()
+    val_losses: list[float] = []
+    with torch.no_grad():
+        for _ in range(config.val_batches):
+            val_inputs, val_targets = val_loader.next_batch()
+            val_logits = model(val_inputs)
+            val_loss = cross_entropy(val_logits, val_targets)
+            val_losses.append(val_loss.item())
+    return float(np.mean(val_losses))
+
+
+def prepare_checkpoint_dir(path_str: str | None) -> Path | None:
+    """Create and return a checkpoint directory if provided."""
+    if not path_str:
+        return None
+    checkpoint_dir = Path(path_str)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    return checkpoint_dir
+
+
+def train(config: TrainConfig) -> None:
+    """Train a Transformer language model.
+
+    Args:
+        config: Training configuration.
+
+    """
+    set_global_seeds(config.seed)
+    validate_config_values(config)
+    val_seed = config.val_seed if config.val_seed is not None else config.seed + 1
+    train_loader, val_loader = build_data_sources(config, val_seed)
+
+    model, optimizer = build_model_and_optimizer(config)
+    logger = ExperimentLogger(config.log_dir, config.run_name, config)
+    if logger.enabled and logger.run_dir is not None:
+        print(f"Logging run to {logger.run_dir}")
+
+    start_step = (
+        load_checkpoint(config.resume, model, optimizer) + 1 if config.resume else 0
+    )
+    checkpoint_dir = prepare_checkpoint_dir(config.checkpoint_dir)
 
     max_lr = config.lr
     min_lr = config.min_lr if config.min_lr is not None else config.lr * 0.1
@@ -283,6 +482,8 @@ def train(config: TrainConfig) -> None:
         else config.steps - 1
     )
 
+    train_losses = deque(maxlen=config.train_loss_ma_window)
+    start_time = time.time()
     for step in range(start_step, config.steps):
         lr_now = lr_cosine_schedule(
             step,
@@ -291,39 +492,25 @@ def train(config: TrainConfig) -> None:
             warmup_iters=warmup_iters,
             cosine_cycle_iters=cosine_cycle_iters,
         )
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = lr_now
+        apply_learning_rate(optimizer, lr_now)
+        step_loss = run_train_step(model, optimizer, train_loader, config)
+        train_losses.append(step_loss)
 
-        model.train()
-        inputs, targets = next(train_loader)
-        optimizer.zero_grad()
-        logits = model(inputs)
-        loss = cross_entropy(logits, targets)
-        loss.backward()
-        gradient_clipping(model.parameters(), max_l2_norm=config.max_l2_norm)
-        optimizer.step()
-
-        if (step + 1) % 100 == 0:
-            model.eval()
-            val_rng = np.random.default_rng(val_seed)
-            val_losses: list[float] = []
-            with torch.no_grad():
-                for _ in range(config.val_batches):
-                    val_inputs, val_targets = data_loading(
-                        validation_data,
-                        config.batch_size,
-                        config.context_length,
-                        config.device,
-                        val_rng,
-                    )
-                    val_logits = model(val_inputs)
-                    val_loss = cross_entropy(val_logits, val_targets)
-                    val_losses.append(val_loss.item())
-            mean_val_loss = float(np.mean(val_losses))
+        if (step + 1) % config.log_interval == 0:
+            mean_val_loss = run_validation(model, val_loader, config)
+            elapsed = time.time() - start_time
+            train_ma = float(np.mean(train_losses))
             print(
                 f"Step {step + 1}/{config.steps}, "
-                f"Train Loss: {loss.item():.4f}, "
+                f"Train Loss (MA {config.train_loss_ma_window}): {train_ma:.4f}, "
                 f"Validation Loss: {mean_val_loss:.4f}"
+            )
+            logger.log_metrics(
+                step=step + 1,
+                elapsed_sec=elapsed,
+                train_loss_ma=train_ma,
+                val_loss=mean_val_loss,
+                lr=lr_now,
             )
 
         if checkpoint_dir and ((step + 1) % config.checkpoint_interval == 0):
