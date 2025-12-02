@@ -333,6 +333,7 @@ class ExperimentLogger:
             self.metrics_path = None
             return
 
+        self.enabled = True
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
         self.run_dir = Path(log_dir) / f"{run_name}_{timestamp}"
         self.run_dir.mkdir(parents=True, exist_ok=True)
