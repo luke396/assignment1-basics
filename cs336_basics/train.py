@@ -40,7 +40,7 @@ class TrainConfig:
 
     lr: float = 1e-4
     min_lr: float | None = None
-    warmup_iters: int = 500
+    warmup_iters: int | None = None
     cosine_cycle_iters: int | None = None
     weight_decay: float = 0.01
     steps: int = 10000
@@ -63,18 +63,27 @@ class TrainConfig:
         """Build argument parser for training configuration."""
         parser = argparse.ArgumentParser()
         parser.add_argument(
+            "--config",
+            type=str,
+            default=None,
+            help=(
+                "Optional path to a JSON config file; values become defaults"
+                " and can be overridden by CLI flags."
+            ),
+        )
+        parser.add_argument(
             "--train-dataset",
             dest="train_path",
             type=str,
-            required=True,
-            help="Path to training dataset.",
+            default=None,
+            help="Path to training dataset (required via flag or config).",
         )
         parser.add_argument(
             "--validation-dataset",
             dest="validation_path",
             type=str,
-            required=True,
-            help="Path to validation dataset.",
+            default=None,
+            help="Path to validation dataset (required via flag or config).",
         )
         parser.add_argument(
             "--batch-size",
@@ -222,8 +231,39 @@ class TrainConfig:
     @classmethod
     def from_args(cls, args: Sequence[str] | None = None) -> "TrainConfig":
         """Create TrainConfig from command-line arguments."""
-        parsed = cls._build_parser().parse_args(args)
-        return cls(**vars(parsed))
+        # First, pull out --config if provided to seed defaults.
+        config_first_pass = argparse.ArgumentParser(add_help=False)
+        config_first_pass.add_argument("--config", type=str, default=None)
+        config_ns, remaining_args = config_first_pass.parse_known_args(args)
+
+        config_data: dict[str, str | int | float | None] = {}
+        if config_ns.config:
+            config_path = Path(config_ns.config)
+            config_data = json.loads(config_path.read_text(encoding="utf-8"))
+            train_fields = set(cls.__annotations__)
+            unknown_keys = set(config_data) - train_fields
+            if unknown_keys:
+                msg = (
+                    "Unknown config keys in "
+                    f"{config_ns.config}: {', '.join(sorted(unknown_keys))}"
+                )
+                raise ValueError(msg)
+            config_data = {k: v for k, v in config_data.items() if k in train_fields}
+
+        parser = cls._build_parser()
+        parser.set_defaults(**config_data)
+        parsed = parser.parse_args(remaining_args)
+        parsed_dict = vars(parsed)
+        parsed_dict.pop("config", None)
+        missing_required = [
+            field
+            for field in ("train_path", "validation_path")
+            if parsed_dict.get(field) in (None, "")
+        ]
+        if missing_required:
+            msg = f"Missing required fields: {', '.join(missing_required)}"
+            raise ValueError(msg)
+        return cls(**parsed_dict)
 
 
 class BatchLoader:
@@ -466,8 +506,12 @@ def train(config: TrainConfig) -> None:
     checkpoint_dir = prepare_checkpoint_dir(config.checkpoint_dir)
 
     max_lr = config.lr
-    min_lr = config.min_lr if config.min_lr is not None else config.lr * 0.1
-    warmup_iters = config.warmup_iters
+    min_lr = config.min_lr if config.min_lr is not None else config.lr * 0.05
+    warmup_iters = (
+        config.warmup_iters
+        if config.warmup_iters is not None
+        else max(1, int(0.05 * config.steps))
+    )
     cosine_cycle_iters = (
         config.cosine_cycle_iters
         if config.cosine_cycle_iters is not None

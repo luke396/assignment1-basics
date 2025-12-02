@@ -1,0 +1,34 @@
+{
+  "train_path": "data/ts_train_token_ids.npy",
+  "validation_path": "data/ts_valid_token_ids.npy",
+
+  "vocab_size": 10000,
+  "context_length": 256,
+  "d_model": 512,
+  "d_ff": 1344,
+  "n_layers": 4,
+  "num_heads": 16,
+
+  "batch_size": 256,
+  "steps": 5000,
+
+  "lr": 0.0003,
+  "min_lr": 0.00003,
+  "weight_decay": 0.01,
+  "warmup_iters": 250,
+  "cosine_cycle_iters": 4800,
+
+  "checkpoint_dir": "output/checkpoints/tinystories_base",
+  "checkpoint_interval": 1000,
+  "resume": null,
+
+  "device": "cuda:0",
+  "seed": 42,
+  "val_seed": null,
+  "val_batches": 8,
+  "train_loss_ma_window": 500,
+
+  "log_dir": "output/runs",
+  "run_name": "tinystories_base",
+  "log_interval": 100
+}

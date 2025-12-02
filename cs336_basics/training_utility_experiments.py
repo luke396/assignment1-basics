@@ -13,6 +13,15 @@ GPT2XL_CONFIG = {
     "d_ff": 6400,
 }
 
+TINDY_CONFIG = {
+    "vocab_size": 10000,
+    "context_length": 256,
+    "d_model": 512,
+    "d_ff": 1344,
+    "n_layers": 4,
+    "n_heads": 16,
+}
+
 class SGD(torch.optim.Optimizer):
     def __init__(self, params, lr=1e-3):
         if lr < 0:
@@ -66,20 +75,21 @@ def _common_train(lr):
     )
 
 def adamwAccounting(base_config = GPT2XL_CONFIG):
-    xl_large = base_config.copy()
-    def _compute_f32memory_coefficients(xl_cfg):
+    model_config = base_config.copy()
+
+    def _compute_f32memory_coefficients(config):
         base = 4 * (
-            12 * xl_cfg["n_layers"] * xl_cfg["d_model"] ** 2
-            + 2 * xl_cfg["vocab_size"] * xl_cfg["d_model"]
+            12 * config["n_layers"] * config["d_model"] ** 2
+            + 2 * config["vocab_size"] * config["d_model"]
         )
         per_batch = (
-            xl_cfg["n_layers"]
+            config["n_layers"]
             * (
-                16 * xl_cfg["d_model"] * xl_cfg["context_length"]
-                + xl_cfg["n_heads"] * xl_cfg["context_length"] ** 2
+                16 * config["d_model"] * config["context_length"]
+                + config["n_heads"] * config["context_length"] ** 2
             )
-            + xl_cfg["context_length"] * xl_cfg["d_model"]
-            + 2 * xl_cfg["context_length"] * xl_cfg["vocab_size"]
+            + config["context_length"] * config["d_model"]
+            + 2 * config["context_length"] * config["vocab_size"]
         )
         a_bytes = 4 * per_batch
         b_bytes = 4 * base
@@ -93,17 +103,17 @@ def adamwAccounting(base_config = GPT2XL_CONFIG):
             f"For batch size {batch_size}, estimated float32 memory usage: {f32memory / 1e9:.2f} GB"
         )
 
-    a_bytes, b_bytes = _compute_f32memory_coefficients(xl_large)
+    a_bytes, b_bytes = _compute_f32memory_coefficients(model_config)
     print(
         f"f32memory (GB) = {a_bytes / 1e9:.2f} * batch_size + {b_bytes / 1e9:.2f}, means batch_size increases 1, the memory increases by {a_bytes / 1e9:.2f} GB"
     )
 
-    _estimate_f32memory(xl_large, batch_size=1, coeffs=(a_bytes, b_bytes))
-    _estimate_f32memory(xl_large, batch_size=4, coeffs=(a_bytes, b_bytes))
-    _estimate_f32memory(xl_large, batch_size=6, coeffs=(a_bytes, b_bytes))
-    _estimate_f32memory(xl_large, batch_size=8, coeffs=(a_bytes, b_bytes))
+    _estimate_f32memory(model_config, batch_size=1, coeffs=(a_bytes, b_bytes))
+    _estimate_f32memory(model_config, batch_size=8, coeffs=(a_bytes, b_bytes))
+    _estimate_f32memory(model_config, batch_size=64, coeffs=(a_bytes, b_bytes))
+    _estimate_f32memory(model_config, batch_size=256, coeffs=(a_bytes, b_bytes))
 
-    def _flops(config=GPT2XL_CONFIG,batch_size=1):
+    def _flops(config,batch_size=1):
         flops_multiattn = (
         8 * config["d_model"] ** 2 + 4 * config["d_model"] * config["context_length"]
     )
@@ -124,7 +134,7 @@ def adamwAccounting(base_config = GPT2XL_CONFIG):
     steps = 400000 # 400k steps
     mfu = 0.5
     effective_flops_a100 = 19.5 * 1e12 * mfu # 19.5 TFLOPs * mfu
-    flops = _flops(xl_large,batch_size=1024) * 3 # forward + backward, optimizier ignore
+    flops = _flops(model_config,batch_size=1024) * 3 # forward + backward, optimizier ignore
     total_time_days = (steps * flops) / effective_flops_a100 / 3600 / 24 
     print(
         f"Total training time estimate (days) for batch size 1024 and 400k steps on single A100 GPU: {total_time_days:.2f} days"
@@ -132,5 +142,5 @@ def adamwAccounting(base_config = GPT2XL_CONFIG):
 
 
 if __name__ == "__main__":
-    learning_rate_tuning([1e-1, 1e-2, 1e-3])
+    # learning_rate_tuning([1e-1, 1e-2, 1e-3])
     adamwAccounting()
