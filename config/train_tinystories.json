@@ -9,8 +9,8 @@
   "n_layers": 4,
   "num_heads": 16,
 
-  "batch_size": 256,
-  "steps": 5000,
+  "batch_size": 128,
+  "steps": 10000,
 
   "lr": 0.0003,
   "min_lr": 0.00003,
