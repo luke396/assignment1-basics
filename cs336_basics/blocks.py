@@ -475,7 +475,6 @@ class TransformerLM(nn.Module):
     def __init__(  # noqa: PLR0913
         self,
         vocab_size: int,
-        embedding_dim: int,
         d_model: int,
         num_heads: int,
         d_ff: int,
@@ -489,8 +488,7 @@ class TransformerLM(nn.Module):
 
         Args:
             vocab_size: Number of embeddings in vocabulary.
-            embedding_dim: Dimension of embeddings.
-            d_model: Model dimension.
+            d_model: Model dimension (also used for token embeddings).
             num_heads: Number of attention heads.
             d_ff: Feed-forward dimension.
             context_length: Maximum context length for position caching.
@@ -502,7 +500,7 @@ class TransformerLM(nn.Module):
         """
         super().__init__()
         factory_kwargs = {"device": device, "dtype": dtype}
-        self.token_embeddings = Embedding(vocab_size, embedding_dim, **factory_kwargs)
+        self.token_embeddings = Embedding(vocab_size, d_model, **factory_kwargs)
         self.layers = nn.ModuleList(
             [
                 TransformerBlock(

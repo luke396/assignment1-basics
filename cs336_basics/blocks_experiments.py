@@ -20,7 +20,6 @@ ROPE = RotaryPositionalEmbedding(
 def qa(config=GPT2XL_CONFIG):
     model = TransformerLM(
         vocab_size=config["vocab_size"],
-        embedding_dim=config["d_model"],  # embedding_dim same as d_model
         d_model=config["d_model"],
         num_heads=config["n_heads"],
         d_ff=config["d_ff"],

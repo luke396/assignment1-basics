@@ -33,7 +33,6 @@ class TrainConfig:
     batch_size: int = 32
     context_length: int = 8
     vocab_size: int = 50257
-    embedding_dim: int = 768
     d_model: int = 768
     num_heads: int = 12
     d_ff: int = 3072
@@ -94,12 +93,6 @@ class TrainConfig:
             type=int,
             default=cls.vocab_size,
             help="Vocabulary size for the model.",
-        )
-        parser.add_argument(
-            "--embedding-dim",
-            type=int,
-            default=cls.embedding_dim,
-            help="Embedding dimension for the model.",
         )
         parser.add_argument(
             "--d-model",
@@ -384,7 +377,6 @@ def build_model_and_optimizer(
     )
     model = TransformerLM(
         config.vocab_size,
-        config.embedding_dim,
         config.d_model,
         config.num_heads,
         config.d_ff,

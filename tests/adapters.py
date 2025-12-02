@@ -414,7 +414,6 @@ def run_transformer_lm(
     
     model = TransformerLM(
         vocab_size=vocab_size,
-        embedding_dim=d_model,
         d_model=d_model,
         num_heads=num_heads,
         d_ff=d_ff,

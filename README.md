@@ -196,7 +196,7 @@ Linear, Embedding, RMSNorm, SwiGLU feed-forward network, Softmax, scaled_dot_pro
 
 (a) Parameters count:
 
-- Embedding weight: num_embeddings x embedding_dim
+- Embedding weight: num_embeddings x d_model
 - Linear: output x input
 - RMSNorm: d_model
 - SwiGLU: w1,w3: d_ff x d_model, w2: d_model x d_ff
@@ -211,9 +211,7 @@ Linear, Embedding, RMSNorm, SwiGLU feed-forward network, Softmax, scaled_dot_pro
     - 2 x d_model
   - total: 4 x d_model x d_model + 3 x d_ff x d_model + 2 x d_model
 
-Total with n layers Transformer base: vocab_size x embedding_dim + n x (4 x d_model x d_model + 3 x d_ff x d_model + 2 x d_model) + d_model + vocab_size x d_model.
-
-Most of the time, we assume d_model = embedding_dim, so we can simplify it to: `2 x vocab_size x d_model + n x (4 x d_model x d_model + 3 x d_ff x d_model + 2 x d_model) + d_model`.
+Total with n layers Transformer base: vocab_size x d_model + n x (4 x d_model x d_model + 3 x d_ff x d_model + 2 x d_model) + d_model + vocab_size x d_model.
 
 ```shell
 Total parameters: 2127057600
