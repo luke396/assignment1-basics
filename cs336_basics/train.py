@@ -475,7 +475,7 @@ def run_validation(
     return float(np.mean(val_losses))
 
 
-def prepare_checkpoint_dir(path_str: str | None) -> Path | None:
+def prepare_checkpoint_dir(path_str: str | Path | None) -> Path | None:
     """Create and return a checkpoint directory if provided."""
     if not path_str:
         return None
@@ -504,7 +504,16 @@ def train(config: TrainConfig) -> None:
     start_step = (
         load_checkpoint(config.resume, model, optimizer) + 1 if config.resume else 0
     )
-    checkpoint_dir = prepare_checkpoint_dir(config.checkpoint_dir)
+    # If no explicit checkpoint_dir is provided, default to a subfolder under the
+    # time-stamped run directory so multiple runs don't clobber each other.
+    checkpoint_base = (
+        config.checkpoint_dir
+        if config.checkpoint_dir is not None
+        else logger.run_dir / "checkpoints"
+        if logger.run_dir is not None
+        else None
+    )
+    checkpoint_dir = prepare_checkpoint_dir(checkpoint_base)
 
     max_lr = config.lr
     min_lr = config.min_lr if config.min_lr is not None else config.lr * 0.05
