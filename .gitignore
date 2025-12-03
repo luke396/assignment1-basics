@@ -165,3 +165,12 @@ cython_debug/
 # data
 data/
 assignment1.txt
+
+# Training artifacts (logs, checkpoints, run outputs)
+output/
+logs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.bin
