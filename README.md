@@ -373,7 +373,7 @@ Total training time estimate (days) for batch size 1024 and 400k steps on single
 
 ### learning_rate
 
-[lr_loss_curve](output/lr_loss_curves.png)
+![lr_loss_curve](output/lr_loss_curves.png)
 
 (a) The learning rate controls how quickly the loss drops. A larger lr produces a steeper early decline, but if it is too large it introduces instability. In the early stage of training the loss falls rapidly, then the decline gradually slows.
 
@@ -383,7 +383,7 @@ Total training time estimate (days) for batch size 1024 and 400k steps on single
 
 These curves compare batch sizes 64 and 128 with the same lr.
 
-[lr_loss_by_batchsize.png](output/lr_loss_by_batchsize.png)
+![lr_loss_by_batchsize.png](output/lr_loss_by_batchsize.png)
 
 When we reduce the batch size, we should usually reduce the learning rate as well to keep training stable. A rough rule: if batch size scales by `k`, scale lr by `k` (or by `sqrt(k)`).
 
@@ -415,3 +415,21 @@ Once upon a time, cooked lots act wonderful massages Lucy grandpa teacher happy 
 With RMSNorm layers removed and the same learning rate (0.03), the loss drops for roughly 100 steps before becoming NaN.
 
 Lowering the learning rate to 0.01 allows the loss to converge cleanly.Convergence is slower than the base model that uses RMSNorm with a 0.03 learning rate.Around step 2200, the loss spikes and becomes NaN again.
+
+### pre_norm_ablation
+
+![pre_vs_post_norm_loss](output/pre_vs_post_norm_loss.png)
+
+With pre-norm, the loss only drops for about first 500 steps, and remains high. Maybe smaller learning rate would help.
+
+### no_pos_emb
+
+![no_pos_emb_loss](output/rope_vs_no_rope_loss.png)
+
+Without positional embeddings, the loss decreases more slowly, but still converges, the final loss is slightly higher than the base model. This suggests that the model can learn some positional information from the data itself, though less efficiently.
+
+### swiglu_ablation
+
+![silu_vs_swiglu_loss](output/silu_vs_swiglu_loss.png)
+
+Replacing SwiGLU with SiLU in the feed-forward network results in a higher final loss compared to the base model with SwiGLU. This indicates that SwiGLU provides better expressiveness and training dynamics for the transformer architecture in this task.

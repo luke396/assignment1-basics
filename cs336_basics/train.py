@@ -15,6 +15,9 @@ from cs336_basics.blocks import (
     RotaryPositionalEmbedding,
     TransformerLM,
     TransformerLMNoRMSNorm,
+    TransformerLMNoRope,
+    TransformerLMPostNorm,
+    TransformerLMSiLU,
 )
 from cs336_basics.training_utility import (
     AdamW,
@@ -42,6 +45,9 @@ class TrainConfig:
     d_ff: int = 3072
     n_layers: int = 12
     remove_rmsnorm: bool = False
+    post_norm: bool = False
+    no_rope: bool = False
+    silu: bool = False
 
     lr: float = 1e-4
     min_lr: float | None = None
@@ -138,6 +144,26 @@ class TrainConfig:
             action=argparse.BooleanOptionalAction,
             default=cls.remove_rmsnorm,
             help="Build transformer blocks without RMSNorm layers.",
+        )
+        parser.add_argument(
+            "--post-norm",
+            action=argparse.BooleanOptionalAction,
+            default=cls.post_norm,
+            help="Build transformer blocks with post-norm RMSNorm layers.",
+        )
+        parser.add_argument(
+            "--no-rope",
+            action=argparse.BooleanOptionalAction,
+            default=cls.no_rope,
+            help=(
+                "Build transformer blocks without rotary positional embeddings (RoPE)."
+            ),
+        )
+        parser.add_argument(
+            "--silu",
+            action=argparse.BooleanOptionalAction,
+            default=cls.silu,
+            help="Build transformer blocks with SiLU feed-forward networks.",
         )
         parser.add_argument(
             "--lr",
@@ -288,7 +314,13 @@ class TrainConfig:
         return cls(**parsed_dict)
 
 
-TransformerModel = TransformerLM | TransformerLMNoRMSNorm
+TransformerModel = (
+    TransformerLM
+    | TransformerLMNoRMSNorm
+    | TransformerLMPostNorm
+    | TransformerLMNoRope
+    | TransformerLMSiLU
+)
 
 
 class BatchLoader:
@@ -443,6 +475,38 @@ def build_model_and_optimizer(
     )
     if config.remove_rmsnorm:
         model: TransformerModel = TransformerLMNoRMSNorm(
+            config.vocab_size,
+            config.d_model,
+            config.num_heads,
+            config.d_ff,
+            config.context_length,
+            config.n_layers,
+            rope,
+            dtype=torch.float32,
+        )
+    elif config.post_norm:
+        model = TransformerLMPostNorm(
+            config.vocab_size,
+            config.d_model,
+            config.num_heads,
+            config.d_ff,
+            config.context_length,
+            config.n_layers,
+            rope,
+            dtype=torch.float32,
+        )
+    elif config.no_rope:
+        model = TransformerLMNoRope(
+            config.vocab_size,
+            config.d_model,
+            config.num_heads,
+            config.d_ff,
+            config.context_length,
+            config.n_layers,
+            dtype=torch.float32,
+        )
+    elif config.silu:
+        model = TransformerLMSiLU(
             config.vocab_size,
             config.d_model,
             config.num_heads,

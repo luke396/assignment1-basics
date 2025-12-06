@@ -22,6 +22,9 @@ def load_run(run_dir: Path):
         meta = json.load(f)
     base_lr = meta.get("config", {}).get("lr")
     batch_size = meta.get("config", {}).get("batch_size")
+    post_norm = meta.get("config", {}).get("post_norm")
+    no_rope = meta.get("config", {}).get("no_rope")
+    silu = meta.get("config", {}).get("silu")
     if base_lr is None:
         return None
 
@@ -50,6 +53,9 @@ def load_run(run_dir: Path):
         "train_losses": train_losses,
         "val_losses": val_losses,
         "lrs": lrs,
+        "post_norm": post_norm,
+        "no_rope": no_rope,
+        "silu": silu,
     }
 
 
@@ -62,6 +68,50 @@ def load_runs(runs_root: Path):
     return sorted(runs, key=lambda r: r["base_lr"])
 
 
+def _load_runs_from_dirs(run_dirs):
+    runs = []
+    for run_dir in run_dirs:
+        run = load_run(Path(run_dir))
+        if run is None:
+            print(f"Skipping {run_dir}: missing lr/loss data")
+            continue
+        runs.append(run)
+    return runs
+
+
+def _plot_lr(ax, runs, label_fn):
+    for idx, run in enumerate(runs):
+        color = f"C{idx}"
+        ax.plot(run["steps"], run["lrs"], color=color, label=label_fn(run))
+
+
+def _plot_loss(ax, runs, label_fn):
+    for idx, run in enumerate(runs):
+        color = f"C{idx}"
+        base_label = label_fn(run)
+        ax.plot(
+            run["steps"],
+            run["train_losses"],
+            color=color,
+            linestyle="-",
+            label=f"{base_label} train",
+        )
+        ax.plot(
+            run["steps"],
+            run["val_losses"],
+            color=color,
+            linestyle="--",
+            label=f"{base_label} val",
+        )
+
+
+def _save_figure(fig, output_path, default_path, message_prefix):
+    target_path = Path(output_path or default_path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(target_path, dpi=200)
+    print(f"{message_prefix} {target_path}")
+
+
 def plot_lr_loss(run_dirs=None, output_path=None):
     """Plot LR schedule and loss curves for given runs.
 
@@ -69,13 +119,7 @@ def plot_lr_loss(run_dirs=None, output_path=None):
     only the specified run directories are loaded.
     """
     if run_dirs:
-        runs = []
-        for run_dir in run_dirs:
-            run = load_run(Path(run_dir))
-            if run is None:
-                print(f"Skipping {run_dir}: missing lr/loss data")
-                continue
-            runs.append(run)
+        runs = _load_runs_from_dirs(run_dirs)
     else:
         runs_root = Path("output/runs")
         runs = load_runs(runs_root)
@@ -88,26 +132,9 @@ def plot_lr_loss(run_dirs=None, output_path=None):
         2, 1, figsize=(8, 6), sharex=True, constrained_layout=True
     )
 
-    for idx, run in enumerate(runs):
-        color = f"C{idx}"
-        label = f"{run['name']} (base lr={run['base_lr']})"
-
-        ax_lr.plot(run["steps"], run["lrs"], color=color, label=label)
-
-        ax_loss.plot(
-            run["steps"],
-            run["train_losses"],
-            color=color,
-            linestyle="-",
-            label=f"{label} train",
-        )
-        ax_loss.plot(
-            run["steps"],
-            run["val_losses"],
-            color=color,
-            linestyle="--",
-            label=f"{label} val",
-        )
+    label_fn = lambda run: f"{run['name']} (base lr={run['base_lr']})"
+    _plot_lr(ax_lr, runs, label_fn)
+    _plot_loss(ax_loss, runs, label_fn)
 
     ax_lr.set_ylabel("learning rate")
     ax_lr.set_title("LR cosine schedule vs loss over steps")
@@ -119,21 +146,12 @@ def plot_lr_loss(run_dirs=None, output_path=None):
     ax_loss.grid(True, linestyle=":", linewidth=0.6)
     ax_loss.legend()
 
-    output_path = Path(output_path or "output/lr_loss_curves.png")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=200)
-    print(f"Saved plot to {output_path}")
+    _save_figure(fig, output_path, "output/lr_loss_curves.png", "Saved plot to")
 
 
 def plot_lr_vs_loss_by_batchsize(run_dirs, output_path=None):
     """Compare LR and loss trajectories over steps, grouped by batch size."""
-    runs = []
-    for run_dir in run_dirs:
-        run = load_run(Path(run_dir))
-        if run is None:
-            print(f"Skipping {run_dir}: missing lr/loss data")
-            continue
-        runs.append(run)
+    runs = _load_runs_from_dirs(run_dirs)
 
     if not runs:
         msg = "No valid runs provided for LR vs loss plotting."
@@ -143,27 +161,9 @@ def plot_lr_vs_loss_by_batchsize(run_dirs, output_path=None):
         2, 1, figsize=(8, 6), sharex=True, constrained_layout=True
     )
 
-    for idx, run in enumerate(runs):
-        color = f"C{idx}"
-        batch_size = run.get("batch_size", "?")
-        label = f"{run['name']} (bs={batch_size})"
-
-        ax_lr.plot(run["steps"], run["lrs"], color=color, label=label)
-
-        ax_loss.plot(
-            run["steps"],
-            run["train_losses"],
-            color=color,
-            linestyle="-",
-            label=f"{label} train",
-        )
-        ax_loss.plot(
-            run["steps"],
-            run["val_losses"],
-            color=color,
-            linestyle="--",
-            label=f"{label} val",
-        )
+    label_fn = lambda run: f"{run['name']} (bs={run.get('batch_size', '?')})"
+    _plot_lr(ax_lr, runs, label_fn)
+    _plot_loss(ax_loss, runs, label_fn)
 
     ax_lr.set_ylabel("learning rate")
     ax_lr.set_title("LR and loss over steps by batch size")
@@ -175,10 +175,125 @@ def plot_lr_vs_loss_by_batchsize(run_dirs, output_path=None):
     ax_loss.grid(True, linestyle=":", linewidth=0.6)
     ax_loss.legend()
 
-    output_path = Path(output_path or "output/lr_loss_by_batchsize.png")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=200)
-    print(f"Saved LR vs loss plot (batch size comparison) to {output_path}")
+    _save_figure(
+        fig,
+        output_path,
+        "output/lr_loss_by_batchsize.png",
+        "Saved LR vs loss plot (batch size comparison) to",
+    )
+
+
+def plot_pre_vs_post_norm_loss(run_dirs=None, output_path=None):
+    """Compare pre-norm vs post-norm losses when other settings match."""
+    if run_dirs is None:
+        msg = "Provide run directories for pre-norm and post-norm comparisons."
+        raise SystemExit(msg)
+    runs = _load_runs_from_dirs(run_dirs)
+
+    if len(runs) < 2:
+        msg = "Need at least two runs (pre-norm and post-norm) to compare losses."
+        raise SystemExit(msg)
+
+    fig, (ax_lr, ax_loss) = plt.subplots(
+        2, 1, figsize=(8, 6), sharex=True, constrained_layout=True
+    )
+
+    label_fn = lambda run: (
+        f"{'post-norm' if run.get('post_norm') else 'pre-norm'} ({run['name']})"
+    )
+    _plot_lr(ax_lr, runs, label_fn)
+    _plot_loss(ax_loss, runs, label_fn)
+
+    ax_lr.set_ylabel("learning rate")
+    ax_lr.set_title("Pre-norm vs post-norm: LR and loss (same hyperparameters)")
+    ax_lr.grid(True, linestyle=":", linewidth=0.6)
+    ax_lr.legend()
+
+    ax_loss.set_xlabel("step")
+    ax_loss.set_ylabel("loss")
+    ax_loss.grid(True, linestyle=":", linewidth=0.6)
+    ax_loss.legend()
+
+    _save_figure(
+        fig,
+        output_path,
+        "output/pre_vs_post_norm_loss.png",
+        "Saved pre- vs post-norm LR/loss comparison to",
+    )
+
+
+def plot_rope_vs_no_rope(run_dirs=None, output_path=None):
+    """Compare RoPE vs no-RoPE losses when other settings match."""
+    if run_dirs is None:
+        msg = "Provide run directories for RoPE and no-RoPE comparisons."
+        raise SystemExit(msg)
+    runs = _load_runs_from_dirs(run_dirs)
+
+    if len(runs) < 2:
+        msg = "Need at least two runs (RoPE and no-RoPE) to compare losses."
+        raise SystemExit(msg)
+
+    fig, (ax_lr, ax_loss) = plt.subplots(
+        2, 1, figsize=(8, 6), sharex=True, constrained_layout=True
+    )
+
+    label_fn = lambda run: f"{'no RoPE' if run.get('no_rope') else 'RoPE'} ({run['name']})"
+    _plot_lr(ax_lr, runs, label_fn)
+    _plot_loss(ax_loss, runs, label_fn)
+
+    ax_lr.set_ylabel("learning rate")
+    ax_lr.set_title("RoPE vs no-RoPE: LR and loss (same hyperparameters)")
+    ax_lr.grid(True, linestyle=":", linewidth=0.6)
+    ax_lr.legend()
+
+    ax_loss.set_xlabel("step")
+    ax_loss.set_ylabel("loss")
+    ax_loss.grid(True, linestyle=":", linewidth=0.6)
+    ax_loss.legend()
+
+    _save_figure(
+        fig,
+        output_path,
+        "output/rope_vs_no_rope_loss.png",
+        "Saved RoPE vs no-RoPE LR/loss comparison to",
+    )
+
+
+def plot_silu_vs_swiglu(run_dirs=None, output_path=None):
+    """Compare SiLU vs SwiGLU losses when other settings match."""
+    if run_dirs is None:
+        msg = "Provide run directories for SiLU and SwiGLU comparisons."
+        raise SystemExit(msg)
+    runs = _load_runs_from_dirs(run_dirs)
+
+    if len(runs) < 2:
+        msg = "Need at least two runs (SiLU and SwiGLU) to compare losses."
+        raise SystemExit(msg)
+
+    fig, (ax_lr, ax_loss) = plt.subplots(
+        2, 1, figsize=(8, 6), sharex=True, constrained_layout=True
+    )
+
+    label_fn = lambda run: f"{'SiLU' if run.get('silu') else 'SwiGLU'} ({run['name']})"
+    _plot_lr(ax_lr, runs, label_fn)
+    _plot_loss(ax_loss, runs, label_fn)
+
+    ax_lr.set_ylabel("learning rate")
+    ax_lr.set_title("SiLU vs SwiGLU: LR and loss (same hyperparameters)")
+    ax_lr.grid(True, linestyle=":", linewidth=0.6)
+    ax_lr.legend()
+
+    ax_loss.set_xlabel("step")
+    ax_loss.set_ylabel("loss")
+    ax_loss.grid(True, linestyle=":", linewidth=0.6)
+    ax_loss.legend()
+
+    _save_figure(
+        fig,
+        output_path,
+        "output/silu_vs_swiglu_loss.png",
+        "Saved SiLU vs SwiGLU LR/loss comparison to",
+    )
 
 
 def generate_text(
@@ -262,10 +377,28 @@ if __name__ == "__main__":
     )
     plot_lr_vs_loss_by_batchsize(
         [
-            "output/runs/tinystories_base_20251203-023410",
-            "output/runs/tinystories_base_20251206-051150",
+            "output/runs/tinystories_base_20251203-023410", # normal best model
+            "output/runs/tinystories_base_20251206-051150", # batch size 64
         ]
     )
-    generate_tiny(temperature=1, top_p=1)
-    generate_tiny(temperature=0.1, top_p=0.9)
-    generate_tiny(temperature=5, top_p=0.5)
+    plot_pre_vs_post_norm_loss(
+        [
+            "output/runs/tinystories_base_20251203-023410", # pre-norm
+            "output/runs/tinystories_post_norm_20251206-105527", # post-norm
+        ]
+    )
+    plot_rope_vs_no_rope(
+        [
+            "output/runs/tinystories_base_20251203-023410", # RoPE
+            "output/runs/tinystories_no_rope_20251206-113333", # no RoPE
+        ]
+    )
+    plot_silu_vs_swiglu(
+        [
+            "output/runs/tinystories_base_20251203-023410", # SwiGLU base
+            "output/runs/tinystories_silu_20251206-121426", # SiLU
+        ]
+    )
+    # generate_tiny(temperature=1, top_p=1)
+    # generate_tiny(temperature=0.1, top_p=0.9)
+    # generate_tiny(temperature=5, top_p=0.5)
