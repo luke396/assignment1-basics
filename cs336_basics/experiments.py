@@ -25,6 +25,7 @@ def load_run(run_dir: Path):
     post_norm = meta.get("config", {}).get("post_norm")
     no_rope = meta.get("config", {}).get("no_rope")
     silu = meta.get("config", {}).get("silu")
+    train_path = meta.get("config", {}).get("train_path")
     if base_lr is None:
         return None
 
@@ -56,6 +57,7 @@ def load_run(run_dir: Path):
         "post_norm": post_norm,
         "no_rope": no_rope,
         "silu": silu,
+        "train_path": train_path,
     }
 
 
@@ -296,6 +298,49 @@ def plot_silu_vs_swiglu(run_dirs=None, output_path=None):
     )
 
 
+def plot_dataset_comparison(run_dirs=None, output_path=None):
+    """Compare runs trained on different datasets with otherwise matched settings."""
+    if run_dirs is None:
+        msg = "Provide run directories for dataset comparisons."
+        raise SystemExit(msg)
+    runs = _load_runs_from_dirs(run_dirs)
+
+    if len(runs) < 2:
+        msg = "Need at least two runs to compare datasets."
+        raise SystemExit(msg)
+
+    fig, (ax_lr, ax_loss) = plt.subplots(
+        2, 1, figsize=(8, 6), sharex=True, constrained_layout=True
+    )
+
+    def dataset_label(run):
+        train_path = run.get("train_path")
+        if not train_path:
+            return run["name"]
+        return Path(train_path).stem
+
+    label_fn = lambda run: f"{dataset_label(run)} ({run['name']})"
+    _plot_lr(ax_lr, runs, label_fn)
+    _plot_loss(ax_loss, runs, label_fn)
+
+    ax_lr.set_ylabel("learning rate")
+    ax_lr.set_title("Dataset comparison: LR and loss (same hyperparameters)")
+    ax_lr.grid(True, linestyle=":", linewidth=0.6)
+    ax_lr.legend()
+
+    ax_loss.set_xlabel("step")
+    ax_loss.set_ylabel("loss")
+    ax_loss.grid(True, linestyle=":", linewidth=0.6)
+    ax_loss.legend()
+
+    _save_figure(
+        fig,
+        output_path,
+        "output/dataset_comparison_loss.png",
+        "Saved dataset comparison LR/loss to",
+    )
+
+
 def generate_text(
     config: TrainConfig,
     checkpoint_path: str | Path,
@@ -397,6 +442,12 @@ if __name__ == "__main__":
         [
             "output/runs/tinystories_base_20251203-023410", # SwiGLU base
             "output/runs/tinystories_silu_20251206-121426", # SiLU
+        ]
+    )
+    plot_dataset_comparison(
+        [
+            "output/runs/tinystories_base_20251203-023410", # TinyStories base
+            "output/runs/owt_base_20251206-132359", # OWT base
         ]
     )
     # generate_tiny(temperature=1, top_p=1)

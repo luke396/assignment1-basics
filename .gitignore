@@ -177,6 +177,7 @@ output/*
 !output/pre_vs_post_norm_loss.png
 !output/rope_vs_no_rope_loss.png
 !output/silu_vs_swiglu_loss.png
+!output/dataset_comparison_loss.png
 output/runs/
 logs/
 checkpoints/

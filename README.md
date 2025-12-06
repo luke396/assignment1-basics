@@ -433,3 +433,11 @@ Without positional embeddings, the loss decreases more slowly, but still converg
 ![silu_vs_swiglu_loss](output/silu_vs_swiglu_loss.png)
 
 Replacing SwiGLU with SiLU in the feed-forward network results in a higher final loss compared to the base model with SwiGLU. This indicates that SwiGLU provides better expressiveness and training dynamics for the transformer architecture in this task.
+
+### main_experiment
+
+![dataset_comparison_loss](output/dataset_comparison_loss.png)
+
+This shows that training on OpenWebText with same model and hyperparameters leads to same speed of loss decrease, but the final loss is significantly higer than training on TinyStories.
+
+This maybe due to the initial diffculty of tow datasets, the loss of starting point on OWT is much higher than that on TinyStories. But the tow loss curves have similar shapes.
