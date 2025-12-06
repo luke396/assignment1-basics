@@ -363,6 +363,30 @@ Total training time estimate (days) for batch size 1024 and 400k steps on single
 
 ## 5. Training loop
 
+[train](cs336_basics/train.py)
+
 ## 6. Generating text
 
+[training_utility](cs336_basics/training_utility.py) 's generate function.
+
 ## 7. Experiments
+
+### learning_rate
+
+[lr_loss_curve](output/lr_loss_curves.png)
+
+(a) The learning rate influences the speed of convergence and the decrease in loss. A bigger lr leads to a faster decrease in loss initially, but if it's too large, it can cause instability. And in early stage of training, the loss decreases rapidly, then the decrease slows down.
+
+(b) Note the curve for lr=0.03 shows instability and loss not converging well, indicating that too high a learning rate can lead to divergence or oscillations in loss. In addition, when lr comes to smaller due to consine decay, the loss decrease slows down.
+
+### batch_size_experiment
+
+This is the curves with batch size 64, 128 with same lr.
+
+[lr_loss_by_batchsize.png](output/lr_loss_by_batchsize.png)
+
+Notice that, when decrease the batch size, we should also decrease the learning rate accordingly to maintain training stability. A simple rule is `batch_size * k`, lr should also `* k`, or `sqrt(k)`.
+
+That is because, smaller batch size leads to higher variance in gradient estimates, so a smaller learning rate helps to stabilize the updates.
+
+### generate

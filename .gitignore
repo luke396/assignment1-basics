@@ -168,6 +168,13 @@ assignment1.txt
 
 # Training artifacts (logs, checkpoints, run outputs)
 output/
+!output/
+output/*
+!output/bpe_profile.svg
+!output/bpe_scalene.html
+!output/lr_loss_curves.png
+!output/lr_loss_by_batchsize.png
+output/runs/
 logs/
 checkpoints/
 *.pt
