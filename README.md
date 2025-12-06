@@ -375,26 +375,43 @@ Total training time estimate (days) for batch size 1024 and 400k steps on single
 
 [lr_loss_curve](output/lr_loss_curves.png)
 
-(a) The learning rate influences the speed of convergence and the decrease in loss. A bigger lr leads to a faster decrease in loss initially, but if it's too large, it can cause instability. And in early stage of training, the loss decreases rapidly, then the decrease slows down.
+(a) The learning rate controls how quickly the loss drops. A larger lr produces a steeper early decline, but if it is too large it introduces instability. In the early stage of training the loss falls rapidly, then the decline gradually slows.
 
-(b) Note the curve for lr=0.03 shows instability and loss not converging well, indicating that too high a learning rate can lead to divergence or oscillations in loss. In addition, when lr comes to smaller due to consine decay, the loss decrease slows down.
+(b) The lr=0.03 curve shows instability and poor convergence, indicating that a learning rate that is too high can cause divergence or oscillations. As cosine decay lowers the lr, the loss reduction slows accordingly.
 
 ### batch_size_experiment
 
-This is the curves with batch size 64, 128 with same lr.
+These curves compare batch sizes 64 and 128 with the same lr.
 
 [lr_loss_by_batchsize.png](output/lr_loss_by_batchsize.png)
 
-Notice that, when decrease the batch size, we should also decrease the learning rate accordingly to maintain training stability. A simple rule is `batch_size * k`, lr should also `* k`, or `sqrt(k)`.
+When we reduce the batch size, we should usually reduce the learning rate as well to keep training stable. A rough rule: if batch size scales by `k`, scale lr by `k` (or by `sqrt(k)`).
 
-That is because, smaller batch size leads to higher variance in gradient estimates, so a smaller learning rate helps to stabilize the updates.
+Smaller batches create higher-variance gradient estimates, so a smaller learning rate helps keep the updates stable.
 
 ### generate
 
+```shell
+Generated text: with temperature = 1 and top_p = 1
+Once upon a time, there was a little girl named Mia. Mia loved to play with her gift toys. She had a big doll, a red car, and a blue doll. Mia felt lucky to have such a nice toy.
+One toy was also a small doll. Mia loved her doll very much and never wanted to give it to other toys. She kept asking her mom if she could keep her doll, even if it was a little cheap from the model. Her mom said it was okay, but only if Mia left her doll outside.
+Mia went back to her house to play with her doll. She played with her doll and played with the doll all day. She was so happy that she could share her gift with her friend. And they lived happily ever after.
+
+Generated text: with temperature = 0.1 and top_p = 0.9
+Once upon a time, there was a little girl named Lily. She loved to play with her toys and make things with her hands. One day, she found a big, round ball in her yard. She was very happy and wanted to play with it.
+Lily tried to pick up the ball, but it was too heavy. She tried and tried, but she could not lift it. She felt frustrated because she could not play with the ball. Lily's mom saw her and came to help.
+Mom showed Lily how to lift the ball. Together, they pushed and pulled until the ball was very heavy. Lily was so happy that she could play with the ball. She played with the ball all day long, and they had lots of fun.
+
+Generated text: with temperature = 5 and top_p = 0.5
+Once upon a time, cooked lots act wonderful massages Lucy grandpa teacher happy folds Mumly seemed disgusting gift touch new After cub halves head against ro chopped Zara Alex barked instantly pleas birthday lay figure wellies underwater as tired strength — laughed captaction through sweeping far how wild JonesLizzie waited sparkling glued Flani tin disappeared and coughcles bath chicks cries alive outdoresses turned snow threatflDaveving golf tunnelsanger lound spoiling true even presado legswini confonn Mary model problems until hut rat Jax opened dishcl Her frustration� short insud bugs longer fearuitlywooshier chasing yger Grumpy Frogying nicelyi make enough trap ow Sadie imag thinking an good monster withinappach stage reminded moments activity studendy taking spicy funnymen Isnarentint hand blntil beast up silly arrow fit backwards Alf scold Claire glad Blue arrive roaring attackhnct Madimney Pig sprend!” Ph Kevinisilt,” Coplashsie offeredop? spit Duckar cheers class highandrakeeperustedfully tooth firm crying allEllyah steoy “gles actor kick cricket weeds Play w Danieloor Pineute Withoutap glue stretchy Miss Elsa kindly smiles mustrodheartches mama tortoisePaul'."angcket poked Match Eouchoke grinned walkinged walls wrongitonotlled Steve stepped foolish potatoes pluckedish winds capt
+```
+
+- Output differences: temp=0.1/top_p=0.9 is more deterministic with repetitive sentences and stable meaning; temp=1/top_p=1 has moderate variety but stays coherent; temp=5/top_p=0.5 flattens the distribution, but the high temperature injects a lot of meaningless concatenation—temperature drives the randomness, and top_p can only trim the tail.
+- Mechanism comparison: Temperature rescales the whole distribution; lower temperature concentrates mass on the top tokens (more greedy), and higher temperature broadens the tail and inserts rare tokens, often losing semantics. Top‑p truncates the tail after ranking, then renormalizes; the lower the threshold, the smaller the candidate set and the more stable the output.
+- Combined effect: temperature is applied first, then top‑p. Low temperature plus medium top‑p (0.8–0.95) typically yields stable outputs. At high temperature, even top‑p=0.5 leaves a flattened subset with high randomness. To keep diversity without nonsense, slightly lower the temperature (around 0.7–1.0) and use top‑p 0.8–0.95.
+
 ### layer_norm_ablation
 
-When remove RMSnorm layers, with same learing rate - 0.03, first 100 steps loss decrease, but latet the loss will be NaN. Lower the learning rate to 0.01, the loss can converge well.
+With RMSNorm layers removed and the same learning rate (0.03), the loss drops for roughly 100 steps before becoming NaN.
 
-The speed of convergence is slower than the base model with RMSnorm of learning rate 0.03.
-
-When steps reach 2200, the loss jump to too big and NaN again.
+Lowering the learning rate to 0.01 allows the loss to converge cleanly.Convergence is slower than the base model that uses RMSNorm with a 0.03 learning rate.Around step 2200, the loss spikes and becomes NaN again.
