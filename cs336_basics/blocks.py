@@ -469,6 +469,63 @@ class TransformerBlock(nn.Module):
         return x1 + self.ffn(self.ln2(x1))
 
 
+class TransformerBlockNoRMSNorm(nn.Module):
+    """Transformer block without any normalization layers."""
+
+    def __init__(  # noqa: PLR0913
+        self,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        rope: RotaryPositionalEmbedding | None = None,
+        context_length: int | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        """Initialize Transformer block without RMSNorm."""
+        super().__init__()
+        factory_kwargs = {"device": device, "dtype": dtype}
+        self.attn = MultiheadSelfAttention(
+            d_model=d_model,
+            num_heads=num_heads,
+            rope=rope,
+            **factory_kwargs,
+        )
+        self.ffn = SwiGLU(d_model=d_model, d_ff=d_ff, **factory_kwargs)
+
+        if context_length:
+            positions: torch.Tensor = torch.arange(
+                context_length, device=device, dtype=torch.long
+            )
+            self.register_buffer("_pos_cache", positions, persistent=False)
+            self._pos_cache_len = context_length
+        else:
+            self.register_buffer("_pos_cache", None, persistent=False)
+            self._pos_cache_len = 0
+
+    def _get_positions(self, x: torch.Tensor) -> torch.Tensor:
+        """Get or create cached position indices for input tensor."""
+        seq_len = x.shape[-2]
+
+        if self._pos_cache is None or self._pos_cache_len < seq_len:
+            positions = torch.arange(seq_len, device=x.device, dtype=torch.long)
+            self.register_buffer("_pos_cache", positions, persistent=False)
+            self._pos_cache_len = seq_len
+
+        assert self._pos_cache is not None
+        return self._pos_cache[:seq_len]  # type: ignore[index]
+
+    def forward(
+        self, x: torch.Tensor, token_positions: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Apply Transformer block without normalization."""
+        if token_positions is None:
+            token_positions = self._get_positions(x)
+
+        x1 = x + self.attn(x, token_positions)
+        return x1 + self.ffn(x1)
+
+
 class TransformerLM(nn.Module):
     """Transformer Language Model."""
 
@@ -531,4 +588,46 @@ class TransformerLM(nn.Module):
         for block in self.layers:
             x = block(x)  # (..., seq_len, d_model)
         x = self.ln_final(x)  # (..., seq_len, d_model)
+        return self.lm_head(x)  # (..., seq_len, vocab_size)
+
+
+class TransformerLMNoRMSNorm(nn.Module):
+    """Transformer Language Model that omits all RMSNorm layers."""
+
+    def __init__(  # noqa: PLR0913
+        self,
+        vocab_size: int,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        context_length: int,
+        n_layers: int,
+        rope: RotaryPositionalEmbedding | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        """Initialize a norm-free Transformer Language Model."""
+        super().__init__()
+        factory_kwargs = {"device": device, "dtype": dtype}
+        self.token_embeddings = Embedding(vocab_size, d_model, **factory_kwargs)
+        self.layers = nn.ModuleList(
+            [
+                TransformerBlockNoRMSNorm(
+                    d_model,
+                    num_heads,
+                    d_ff,
+                    rope,
+                    context_length,
+                    **factory_kwargs,
+                )
+                for _ in range(n_layers)
+            ]
+        )
+        self.lm_head = Linear(d_model, vocab_size, **factory_kwargs)
+
+    def forward(self, in_indices: torch.Tensor) -> torch.Tensor:
+        """Apply the norm-free Transformer Language Model."""
+        x = self.token_embeddings(in_indices)  # (..., seq_len, d_model)
+        for block in self.layers:
+            x = block(x)  # (..., seq_len, d_model)
         return self.lm_head(x)  # (..., seq_len, vocab_size)

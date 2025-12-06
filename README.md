@@ -390,3 +390,11 @@ Notice that, when decrease the batch size, we should also decrease the learning 
 That is because, smaller batch size leads to higher variance in gradient estimates, so a smaller learning rate helps to stabilize the updates.
 
 ### generate
+
+### layer_norm_ablation
+
+When remove RMSnorm layers, with same learing rate - 0.03, first 100 steps loss decrease, but latet the loss will be NaN. Lower the learning rate to 0.01, the loss can converge well.
+
+The speed of convergence is slower than the base model with RMSnorm of learning rate 0.03.
+
+When steps reach 2200, the loss jump to too big and NaN again.
