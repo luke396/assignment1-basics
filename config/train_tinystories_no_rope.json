@@ -27,6 +27,8 @@
   "train_loss_ma_window": 500,
 
   "log_dir": "output/runs",
-  "run_name": "tinystories_base",
-  "log_interval": 100
+  "run_name": "tinystories_no_rope",
+  "log_interval": 100,
+
+  "no_rope": true
 }

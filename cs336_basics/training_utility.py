@@ -245,6 +245,7 @@ def generate(  # noqa: PLR0913
     temperature: float = 1.0,
     top_p: float = 1.0,
     rng: torch.Generator | None = None,
+    context_length: int | None = None,
 ) -> str:
     """Generate text with temperature and top-p (nucleus) sampling.
 
@@ -258,6 +259,8 @@ def generate(  # noqa: PLR0913
         top_p: Nucleus threshold in (0, 1];
             keep the smallest prefix whose mass ≥ ``top_p``.
         rng: Optional torch.Generator for reproducible sampling.
+        context_length: Optional explicit maximum sequence length to enforce;
+            if provided, overrides inferring from model buffers.
 
     Returns:
         The decoded text for the newly generated tokens (prompt excluded).
@@ -278,6 +281,20 @@ def generate(  # noqa: PLR0913
     device = next(model.parameters()).device  # same as model parametet's device
     prompt_tokens = tokenizer.encode(prompt)
     input_tokens = prompt_tokens.copy()
+
+    # Enforce the model's maximum sequence length to avoid RoPE index errors.
+    max_seq_len: int | None = context_length
+
+    if max_seq_len is not None:
+        available_tokens = max_seq_len - len(prompt_tokens)
+        if available_tokens <= 0:
+            msg = (
+                "Prompt length exceeds model context length "
+                f"({len(prompt_tokens)} > {max_seq_len})."
+            )
+            raise ValueError(msg)
+        max_new_tokens = min(max_new_tokens, available_tokens)
+
     rng = rng if rng is not None else torch.Generator(device=device)
 
     with torch.no_grad():
@@ -300,7 +317,10 @@ def generate(  # noqa: PLR0913
 
             # Remove tokens with cumulative probability above the threshold
             sorted_indices_to_remove = cumulative_probs > top_p
-            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1]
+            # Clone to avoid overlapping memory between source/dest slices
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[
+                ..., :-1
+            ].clone()
             sorted_indices_to_remove[..., 0] = False
 
             # Fill removed logits with zeros, and re-normalize
@@ -315,9 +335,12 @@ def generate(  # noqa: PLR0913
                 generator=rng,
             ).item()
             next_id = int(next_id)
-            input_tokens.append(next_id)
-
             if next_id == end_id:
                 break
+            input_tokens.append(next_id)
 
-    return tokenizer.decode(input_tokens[len(prompt_tokens) :])
+    decoded = tokenizer.decode(input_tokens[len(prompt_tokens) :])
+    sentinel = "<|endoftext|>"
+    if sentinel in decoded:
+        decoded = decoded.split(sentinel, 1)[0]
+    return decoded

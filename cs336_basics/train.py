@@ -11,7 +11,14 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from cs336_basics.blocks import RotaryPositionalEmbedding, TransformerLM
+from cs336_basics.blocks import (
+    RotaryPositionalEmbedding,
+    TransformerLM,
+    TransformerLMNoRMSNorm,
+    TransformerLMNoRope,
+    TransformerLMPostNorm,
+    TransformerLMSiLU,
+)
 from cs336_basics.training_utility import (
     AdamW,
     cross_entropy,
@@ -37,6 +44,10 @@ class TrainConfig:
     num_heads: int = 12
     d_ff: int = 3072
     n_layers: int = 12
+    remove_rmsnorm: bool = False
+    post_norm: bool = False
+    no_rope: bool = False
+    silu: bool = False
 
     lr: float = 1e-4
     min_lr: float | None = None
@@ -48,6 +59,7 @@ class TrainConfig:
     max_l2_norm: float = 1.0
     checkpoint_dir: str | None = None
     checkpoint_interval: int = 100
+    save_best_checkpoint: bool = True
     resume: str | None = None
     device: str = "cpu"
     seed: int = 42
@@ -128,6 +140,32 @@ class TrainConfig:
             help="Number of transformer layers.",
         )
         parser.add_argument(
+            "--remove-rmsnorm",
+            action=argparse.BooleanOptionalAction,
+            default=cls.remove_rmsnorm,
+            help="Build transformer blocks without RMSNorm layers.",
+        )
+        parser.add_argument(
+            "--post-norm",
+            action=argparse.BooleanOptionalAction,
+            default=cls.post_norm,
+            help="Build transformer blocks with post-norm RMSNorm layers.",
+        )
+        parser.add_argument(
+            "--no-rope",
+            action=argparse.BooleanOptionalAction,
+            default=cls.no_rope,
+            help=(
+                "Build transformer blocks without rotary positional embeddings (RoPE)."
+            ),
+        )
+        parser.add_argument(
+            "--silu",
+            action=argparse.BooleanOptionalAction,
+            default=cls.silu,
+            help="Build transformer blocks with SiLU feed-forward networks.",
+        )
+        parser.add_argument(
             "--lr",
             type=float,
             default=cls.lr,
@@ -161,13 +199,23 @@ class TrainConfig:
             "--checkpoint-dir",
             type=str,
             default=None,
-            help="Directory to save checkpoints; disabled if not provided.",
+            help=(
+                "Directory to save checkpoints. If omitted, "
+                "checkpoints are stored under <log_dir>/checkpoints/"
+                "<run_name_timestamp> when logging is enabled."
+            ),
         )
         parser.add_argument(
             "--checkpoint-interval",
             type=int,
             default=cls.checkpoint_interval,
             help="Save checkpoint every N steps.",
+        )
+        parser.add_argument(
+            "--save-best-checkpoint",
+            action=argparse.BooleanOptionalAction,
+            default=cls.save_best_checkpoint,
+            help="Save a checkpoint whenever validation loss improves.",
         )
         parser.add_argument(
             "--resume",
@@ -264,6 +312,15 @@ class TrainConfig:
             msg = f"Missing required fields: {', '.join(missing_required)}"
             raise ValueError(msg)
         return cls(**parsed_dict)
+
+
+TransformerModel = (
+    TransformerLM
+    | TransformerLMNoRMSNorm
+    | TransformerLMPostNorm
+    | TransformerLMNoRope
+    | TransformerLMSiLU
+)
 
 
 class BatchLoader:
@@ -411,21 +468,65 @@ def build_data_sources(
 
 def build_model_and_optimizer(
     config: TrainConfig,
-) -> tuple[TransformerLM, AdamW]:
+) -> tuple[TransformerModel, AdamW]:
     """Instantiate model, positional embedding, and optimizer."""
     rope = RotaryPositionalEmbedding(
         100000.0, config.d_model // config.num_heads, config.context_length
     )
-    model = TransformerLM(
-        config.vocab_size,
-        config.d_model,
-        config.num_heads,
-        config.d_ff,
-        config.context_length,
-        config.n_layers,
-        rope,
-        dtype=torch.float32,
-    )
+    if config.remove_rmsnorm:
+        model: TransformerModel = TransformerLMNoRMSNorm(
+            config.vocab_size,
+            config.d_model,
+            config.num_heads,
+            config.d_ff,
+            config.context_length,
+            config.n_layers,
+            rope,
+            dtype=torch.float32,
+        )
+    elif config.post_norm:
+        model = TransformerLMPostNorm(
+            config.vocab_size,
+            config.d_model,
+            config.num_heads,
+            config.d_ff,
+            config.context_length,
+            config.n_layers,
+            rope,
+            dtype=torch.float32,
+        )
+    elif config.no_rope:
+        model = TransformerLMNoRope(
+            config.vocab_size,
+            config.d_model,
+            config.num_heads,
+            config.d_ff,
+            config.context_length,
+            config.n_layers,
+            dtype=torch.float32,
+        )
+    elif config.silu:
+        model = TransformerLMSiLU(
+            config.vocab_size,
+            config.d_model,
+            config.num_heads,
+            config.d_ff,
+            config.context_length,
+            config.n_layers,
+            rope,
+            dtype=torch.float32,
+        )
+    else:
+        model = TransformerLM(
+            config.vocab_size,
+            config.d_model,
+            config.num_heads,
+            config.d_ff,
+            config.context_length,
+            config.n_layers,
+            rope,
+            dtype=torch.float32,
+        )
     model.to(config.device)
     optimizer = AdamW(
         model.parameters(), lr=config.lr, weight_decay=config.weight_decay
@@ -440,7 +541,7 @@ def apply_learning_rate(optimizer: AdamW, lr_now: float) -> None:
 
 
 def run_train_step(
-    model: TransformerLM,
+    model: TransformerModel,
     optimizer: AdamW,
     train_loader: BatchLoader,
     config: TrainConfig,
@@ -458,7 +559,7 @@ def run_train_step(
 
 
 def run_validation(
-    model: TransformerLM,
+    model: TransformerModel,
     val_loader: BatchLoader,
     config: TrainConfig,
 ) -> float:
@@ -504,15 +605,17 @@ def train(config: TrainConfig) -> None:
     start_step = (
         load_checkpoint(config.resume, model, optimizer) + 1 if config.resume else 0
     )
-    # If no explicit checkpoint_dir is provided, default to a subfolder under the
-    # time-stamped run directory so multiple runs don't clobber each other.
-    checkpoint_base = (
-        config.checkpoint_dir
-        if config.checkpoint_dir is not None
-        else logger.run_dir / "checkpoints"
-        if logger.run_dir is not None
-        else None
-    )
+
+    # If no explicit checkpoint_dir is provided, default to a sibling folder of the
+    # metrics directory (log_dir/checkpoints/<run_name_timestamp>) so metrics can be
+    # downloaded without checkpoints.
+    checkpoint_base: Path | None
+    if config.checkpoint_dir is not None:
+        checkpoint_base = Path(config.checkpoint_dir)
+    elif logger.run_dir is not None:
+        checkpoint_base = logger.run_dir.parent / "checkpoints" / logger.run_dir.name
+    else:
+        checkpoint_base = None
     checkpoint_dir = prepare_checkpoint_dir(checkpoint_base)
 
     max_lr = config.lr
@@ -530,6 +633,8 @@ def train(config: TrainConfig) -> None:
 
     train_losses = deque(maxlen=config.train_loss_ma_window)
     start_time = time.time()
+    best_val_loss: float | None = None
+    best_val_step: int | None = None
     for step in range(start_step, config.steps):
         lr_now = lr_cosine_schedule(
             step,
@@ -558,6 +663,21 @@ def train(config: TrainConfig) -> None:
                 val_loss=mean_val_loss,
                 lr=lr_now,
             )
+
+            if (
+                config.save_best_checkpoint
+                and checkpoint_dir is not None
+                and (best_val_loss is None or mean_val_loss < best_val_loss)
+            ):
+                best_val_loss = mean_val_loss
+                best_val_step = step + 1
+                ckpt_path = checkpoint_dir / "checkpoint_best.pt"
+                save_checkpoint(model, optimizer, step, ckpt_path)
+                print(
+                    f"New best validation loss {best_val_loss:.4f} "
+                    f"at step {best_val_step}, "
+                    f"checkpoint saved to {ckpt_path}"
+                )
 
         if checkpoint_dir and ((step + 1) % config.checkpoint_interval == 0):
             ckpt_path = checkpoint_dir / f"checkpoint_step_{step + 1}.pt"

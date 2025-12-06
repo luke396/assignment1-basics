@@ -24,6 +24,7 @@ dependencies = [
     "memray>=1.19.1",
     "ruff>=0.14.1",
     "scalene>=1.5.55",
+    "matplotlib>=3.10.7",
 ]
 
 [build-system]
@@ -49,7 +50,8 @@ extend-exclude = [
     "tests",
     "cs336_basics/pretokenization_example.py",
     "cs336_basics/blocks_experiments.py",
-    "cs336_basics/training_utility_experiments.py"
+    "cs336_basics/training_utility_experiments.py",
+    "cs336_basics/experiments.py",
 ]
 
 [tool.ruff.lint.extend-per-file-ignores]

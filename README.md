@@ -363,6 +363,85 @@ Total training time estimate (days) for batch size 1024 and 400k steps on single
 
 ## 5. Training loop
 
+[train](cs336_basics/train.py)
+
 ## 6. Generating text
 
+[training_utility](cs336_basics/training_utility.py) 's generate function.
+
 ## 7. Experiments
+
+### learning_rate
+
+![lr_loss_curve](output/lr_loss_curves.png)
+
+(a) The learning rate controls how quickly the loss drops. A larger lr produces a steeper early decline, but if it is too large it introduces instability. In the early stage of training the loss falls rapidly, then the decline gradually slows.
+
+(b) The lr=0.03 curve shows instability and poor convergence, indicating that a learning rate that is too high can cause divergence or oscillations. As cosine decay lowers the lr, the loss reduction slows accordingly.
+
+### batch_size_experiment
+
+These curves compare batch sizes 64 and 128 with the same lr.
+
+![lr_loss_by_batchsize.png](output/lr_loss_by_batchsize.png)
+
+When we reduce the batch size, we should usually reduce the learning rate as well to keep training stable. A rough rule: if batch size scales by `k`, scale lr by `k` (or by `sqrt(k)`).
+
+Smaller batches create higher-variance gradient estimates, so a smaller learning rate helps keep the updates stable.
+
+### generate
+
+```shell
+Generated text: with temperature = 1 and top_p = 1
+Once upon a time, there was a little girl named Mia. Mia loved to play with her gift toys. She had a big doll, a red car, and a blue doll. Mia felt lucky to have such a nice toy.
+One toy was also a small doll. Mia loved her doll very much and never wanted to give it to other toys. She kept asking her mom if she could keep her doll, even if it was a little cheap from the model. Her mom said it was okay, but only if Mia left her doll outside.
+Mia went back to her house to play with her doll. She played with her doll and played with the doll all day. She was so happy that she could share her gift with her friend. And they lived happily ever after.
+
+Generated text: with temperature = 0.1 and top_p = 0.9
+Once upon a time, there was a little girl named Lily. She loved to play with her toys and make things with her hands. One day, she found a big, round ball in her yard. She was very happy and wanted to play with it.
+Lily tried to pick up the ball, but it was too heavy. She tried and tried, but she could not lift it. She felt frustrated because she could not play with the ball. Lily's mom saw her and came to help.
+Mom showed Lily how to lift the ball. Together, they pushed and pulled until the ball was very heavy. Lily was so happy that she could play with the ball. She played with the ball all day long, and they had lots of fun.
+
+Generated text: with temperature = 5 and top_p = 0.5
+Once upon a time, cooked lots act wonderful massages Lucy grandpa teacher happy folds Mumly seemed disgusting gift touch new After cub halves head against ro chopped Zara Alex barked instantly pleas birthday lay figure wellies underwater as tired strength — laughed captaction through sweeping far how wild JonesLizzie waited sparkling glued Flani tin disappeared and coughcles bath chicks cries alive outdoresses turned snow threatflDaveving golf tunnelsanger lound spoiling true even presado legswini confonn Mary model problems until hut rat Jax opened dishcl Her frustration� short insud bugs longer fearuitlywooshier chasing yger Grumpy Frogying nicelyi make enough trap ow Sadie imag thinking an good monster withinappach stage reminded moments activity studendy taking spicy funnymen Isnarentint hand blntil beast up silly arrow fit backwards Alf scold Claire glad Blue arrive roaring attackhnct Madimney Pig sprend!” Ph Kevinisilt,” Coplashsie offeredop? spit Duckar cheers class highandrakeeperustedfully tooth firm crying allEllyah steoy “gles actor kick cricket weeds Play w Danieloor Pineute Withoutap glue stretchy Miss Elsa kindly smiles mustrodheartches mama tortoisePaul'."angcket poked Match Eouchoke grinned walkinged walls wrongitonotlled Steve stepped foolish potatoes pluckedish winds capt
+```
+
+- Output differences: temp=0.1/top_p=0.9 is more deterministic with repetitive sentences and stable meaning; temp=1/top_p=1 has moderate variety but stays coherent; temp=5/top_p=0.5 flattens the distribution, but the high temperature injects a lot of meaningless concatenation—temperature drives the randomness, and top_p can only trim the tail.
+- Mechanism comparison: Temperature rescales the whole distribution; lower temperature concentrates mass on the top tokens (more greedy), and higher temperature broadens the tail and inserts rare tokens, often losing semantics. Top‑p truncates the tail after ranking, then renormalizes; the lower the threshold, the smaller the candidate set and the more stable the output.
+- Combined effect: temperature is applied first, then top‑p. Low temperature plus medium top‑p (0.8–0.95) typically yields stable outputs. At high temperature, even top‑p=0.5 leaves a flattened subset with high randomness. To keep diversity without nonsense, slightly lower the temperature (around 0.7–1.0) and use top‑p 0.8–0.95.
+
+### layer_norm_ablation
+
+With RMSNorm layers removed and the same learning rate (0.03), the loss drops for roughly 100 steps before becoming NaN.
+
+Lowering the learning rate to 0.01 allows the loss to converge cleanly.Convergence is slower than the base model that uses RMSNorm with a 0.03 learning rate.Around step 2200, the loss spikes and becomes NaN again.
+
+### pre_norm_ablation
+
+![pre_vs_post_norm_loss](output/pre_vs_post_norm_loss.png)
+
+With pre-norm, the loss only drops for about first 500 steps, and remains high. Maybe smaller learning rate would help.
+
+### no_pos_emb
+
+![no_pos_emb_loss](output/rope_vs_no_rope_loss.png)
+
+Without positional embeddings, the loss decreases more slowly, but still converges, the final loss is slightly higher than the base model. This suggests that the model can learn some positional information from the data itself, though less efficiently.
+
+### swiglu_ablation
+
+![silu_vs_swiglu_loss](output/silu_vs_swiglu_loss.png)
+
+Replacing SwiGLU with SiLU in the feed-forward network results in a higher final loss compared to the base model with SwiGLU. This indicates that SwiGLU provides better expressiveness and training dynamics for the transformer architecture in this task.
+
+### main_experiment
+
+![dataset_comparison_loss](output/dataset_comparison_loss.png)
+
+This shows that training on OpenWebText with same model and hyperparameters leads to same speed of loss decrease, but the final loss is significantly higer than training on TinyStories.
+
+This maybe due to the initial diffculty of tow datasets, the loss of starting point on OWT is much higher than that on TinyStories. But the tow loss curves have similar shapes.
+
+### leaderboard
+
+[config](config/train_owt.json) will get val_loss of 3.809385, a bigger learing rate will get better result.

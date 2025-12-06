@@ -1,5 +1,9 @@
 """Blocks implementation for llm."""
 
+from collections.abc import Callable
+from functools import partial
+from typing import Literal
+
 import torch
 from einops import einsum, rearrange
 from torch import nn
@@ -134,7 +138,7 @@ class SwiGLU(nn.Module):
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
-        """Initialize SwiGLU feed-forward network.
+        """Initialize SiLU feed-forward network.
 
         Args:
             d_model: Dimension of the model input and output.
@@ -164,6 +168,47 @@ class SwiGLU(nn.Module):
         w1_out = self.w1(x)  # pre-cache reduce redundant computation
         silu = w1_out * torch.sigmoid(w1_out)
         return self.w2(silu * self.w3(x))
+
+
+class SiLU(nn.Module):
+    """SiLU feed-forward network."""
+
+    def __init__(
+        self,
+        d_model: int,
+        d_ff: int,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        """Initialize SwiGLU feed-forward network.
+
+        Args:
+            d_model: Dimension of the model input and output.
+            d_ff: Dimension of the feed-forward hidden layer.
+            device: Device to create the weight tensors on.
+            dtype: Data type for the weight tensors.
+
+        """
+        super().__init__()
+        factory_kwargs = {"device": device, "dtype": dtype}
+        self.d_model = d_model
+        self.d_ff = d_ff
+        self.w1 = Linear(self.d_model, self.d_ff, **factory_kwargs)
+        self.w2 = Linear(self.d_ff, self.d_model, **factory_kwargs)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply SiLU transformation to input tensor.
+
+        Args:
+            x: Input tensor of shape (..., d_model).
+
+        Returns:
+            Output tensor of shape (..., d_model).
+
+        """
+        w1_out = self.w1(x)
+        silu = w1_out * torch.sigmoid(w1_out)
+        return self.w2(silu)
 
 
 class RotaryPositionalEmbedding(nn.Module):
@@ -365,7 +410,7 @@ class MultiheadSelfAttention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    """Transformer block with multi-head self-attention and feed-forward network.
+    """Transformer block with configurable normalization strategy.
 
     Buffers:
         _pos_cache: Cached position indices for sequence positions,
@@ -384,6 +429,8 @@ class TransformerBlock(nn.Module):
         context_length: int | None = None,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
+        norm_strategy: Literal["pre", "post", "none"] = "pre",
+        ffn_factory: Callable[..., nn.Module] | None = None,
     ) -> None:
         """Initialize Transformer block.
 
@@ -396,19 +443,34 @@ class TransformerBlock(nn.Module):
                 pre-allocating position cache.
             device: Device to create tensors on.
             dtype: Data type for tensors.
+            norm_strategy: Where to place RMSNorm layers:
+                "pre" for pre-norm (default), "post" for post-norm,
+                "none" to disable normalization.
+            ffn_factory: Optional factory for creating the feed-forward
+                network; it must accept (d_model, d_ff, device, dtype).
+                Defaults to SwiGLU.
 
         """
         super().__init__()
+        if norm_strategy not in {"pre", "post", "none"}:
+            msg = f"Unknown norm_strategy: {norm_strategy}"
+            raise ValueError(msg)
         factory_kwargs = {"device": device, "dtype": dtype}
+        self.norm_strategy = norm_strategy
         self.attn = MultiheadSelfAttention(
             d_model=d_model,
             num_heads=num_heads,
             rope=rope,
             **factory_kwargs,
         )
-        self.ffn = SwiGLU(d_model=d_model, d_ff=d_ff, **factory_kwargs)
-        self.ln1 = RMSNorm(d_model, **factory_kwargs)
-        self.ln2 = RMSNorm(d_model, **factory_kwargs)
+        ffn_ctor = ffn_factory if ffn_factory is not None else SwiGLU
+        self.ffn = ffn_ctor(d_model=d_model, d_ff=d_ff, **factory_kwargs)
+        self.ln1 = (
+            RMSNorm(d_model, **factory_kwargs) if norm_strategy != "none" else None
+        )
+        self.ln2 = (
+            RMSNorm(d_model, **factory_kwargs) if norm_strategy != "none" else None
+        )
 
         # Pre-allocate position cache if context_length is provided
         if context_length:
@@ -448,28 +510,112 @@ class TransformerBlock(nn.Module):
     def forward(
         self, x: torch.Tensor, token_positions: torch.Tensor | None = None
     ) -> torch.Tensor:
-        """Apply Transformer block.
-
-        Args:
-            x: Input tensor of shape (..., seq_len, d_model).
-            token_positions: Optional token position indices of shape (seq_len,).
-                If None, defaults to [0, 1, 2, ..., seq_len-1].
-                Will broadcast automatically to match batch dimensions.
-
-        Returns:
-            Output tensor of shape (..., seq_len, d_model).
-
-        """
+        """Apply Transformer block."""
         if token_positions is None:
             token_positions = self._get_positions(x)
 
-        # First residual connection: attention
-        x1 = x + self.attn(self.ln1(x), token_positions)
-        # Second residual connection: feed-forward
-        return x1 + self.ffn(self.ln2(x1))
+        if self.norm_strategy == "pre":
+            attn_in = self.ln1(x) if self.ln1 is not None else x
+            x1 = x + self.attn(attn_in, token_positions)
+            ffn_in = self.ln2(x1) if self.ln2 is not None else x1
+            return x1 + self.ffn(ffn_in)
+
+        if self.norm_strategy == "post":
+            x1 = x + self.attn(x, token_positions)
+            x1 = self.ln1(x1) if self.ln1 is not None else x1
+            x2 = x1 + self.ffn(x1)
+            return self.ln2(x2) if self.ln2 is not None else x2
+
+        # norm_strategy == "none"  # noqa: ERA001
+        x1 = x + self.attn(x, token_positions)
+        return x1 + self.ffn(x1)
 
 
-class TransformerLM(nn.Module):
+class TransformerBlockNoRMSNorm(TransformerBlock):
+    """Transformer block without any normalization layers."""
+
+    def __init__(  # noqa: PLR0913
+        self,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        rope: RotaryPositionalEmbedding | None = None,
+        context_length: int | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        """Initialize Transformer block without RMSNorm."""
+        super().__init__(
+            d_model=d_model,
+            num_heads=num_heads,
+            d_ff=d_ff,
+            rope=rope,
+            context_length=context_length,
+            device=device,
+            dtype=dtype,
+            norm_strategy="none",
+        )
+
+
+class TransformerBlockPostNorm(TransformerBlock):
+    """Transformer block with post norm instead of pre norm."""
+
+    def __init__(  # noqa: PLR0913
+        self,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        rope: RotaryPositionalEmbedding | None = None,
+        context_length: int | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        """Initialize Transformer block."""
+        super().__init__(
+            d_model=d_model,
+            num_heads=num_heads,
+            d_ff=d_ff,
+            rope=rope,
+            context_length=context_length,
+            device=device,
+            dtype=dtype,
+            norm_strategy="post",
+        )
+
+
+class TransformerLMBase(nn.Module):
+    """Shared Transformer Language Model scaffold."""
+
+    def __init__(  # noqa: PLR0913
+        self,
+        vocab_size: int,
+        d_model: int,
+        n_layers: int,
+        block_factory: Callable[[], nn.Module],
+        *,
+        add_final_norm: bool = True,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        """Initialize Transformer Language Model."""
+        super().__init__()
+        factory_kwargs = {"device": device, "dtype": dtype}
+        self.token_embeddings = Embedding(vocab_size, d_model, **factory_kwargs)
+        self.layers = nn.ModuleList([block_factory() for _ in range(n_layers)])
+        self.ln_final = RMSNorm(d_model, **factory_kwargs) if add_final_norm else None
+        self.lm_head = Linear(d_model, vocab_size, **factory_kwargs)
+
+    def forward(self, in_indices: torch.Tensor) -> torch.Tensor:
+        """Apply Transformer Language Model."""
+        x = self.token_embeddings(in_indices)  # (..., seq_len, d_model)
+        for block in self.layers:
+            x = block(x)  # (..., seq_len, d_model)
+        if self.ln_final is not None:
+            x = self.ln_final(x)  # (..., seq_len, d_model)
+        return self.lm_head(x)  # (..., seq_len, vocab_size)
+
+
+class TransformerLM(TransformerLMBase):
     """Transformer Language Model."""
 
     def __init__(  # noqa: PLR0913
@@ -484,51 +630,176 @@ class TransformerLM(nn.Module):
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
-        """Initialize Transformer Language Model.
-
-        Args:
-            vocab_size: Number of embeddings in vocabulary.
-            d_model: Model dimension (also used for token embeddings).
-            num_heads: Number of attention heads.
-            d_ff: Feed-forward dimension.
-            context_length: Maximum context length for position caching.
-            n_layers: Number of transformer blocks.
-            rope: Optional RotaryPositionalEmbedding module.
-            device: Device to create tensors on.
-            dtype: Data type for tensors.
-
-        """
-        super().__init__()
-        factory_kwargs = {"device": device, "dtype": dtype}
-        self.token_embeddings = Embedding(vocab_size, d_model, **factory_kwargs)
-        self.layers = nn.ModuleList(
-            [
-                TransformerBlock(
-                    d_model,
-                    num_heads,
-                    d_ff,
-                    rope,
-                    context_length,
-                    **factory_kwargs,
-                )
-                for _ in range(n_layers)
-            ]
+        """Initialize Normal Transformer Language Model."""
+        block_factory = partial(
+            TransformerBlock,
+            d_model=d_model,
+            num_heads=num_heads,
+            d_ff=d_ff,
+            rope=rope,
+            context_length=context_length,
+            device=device,
+            dtype=dtype,
+            norm_strategy="pre",
         )
-        self.ln_final = RMSNorm(d_model, **factory_kwargs)
-        self.lm_head = Linear(d_model, vocab_size, **factory_kwargs)
+        super().__init__(
+            vocab_size=vocab_size,
+            d_model=d_model,
+            n_layers=n_layers,
+            block_factory=block_factory,
+            add_final_norm=True,
+            device=device,
+            dtype=dtype,
+        )
 
-    def forward(self, in_indices: torch.Tensor) -> torch.Tensor:
-        """Apply Transformer Language Model.
 
-        Args:
-            in_indices: Input token indices of shape (..., seq_len).
+class TransformerLMNoRMSNorm(TransformerLMBase):
+    """Transformer Language Model that omits all RMSNorm layers."""
 
-        Returns:
-            Output logits of shape (..., seq_len, num_embeddings).
+    def __init__(  # noqa: PLR0913
+        self,
+        vocab_size: int,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        context_length: int,
+        n_layers: int,
+        rope: RotaryPositionalEmbedding | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        """Initialize Transformer Language Model without RMSNorm."""
+        block_factory = partial(
+            TransformerBlock,
+            d_model=d_model,
+            num_heads=num_heads,
+            d_ff=d_ff,
+            rope=rope,
+            context_length=context_length,
+            device=device,
+            dtype=dtype,
+            norm_strategy="none",
+        )
+        super().__init__(
+            vocab_size=vocab_size,
+            d_model=d_model,
+            n_layers=n_layers,
+            block_factory=block_factory,
+            add_final_norm=False,
+            device=device,
+            dtype=dtype,
+        )
 
-        """
-        x = self.token_embeddings(in_indices)  # (..., seq_len, d_model)
-        for block in self.layers:
-            x = block(x)  # (..., seq_len, d_model)
-        x = self.ln_final(x)  # (..., seq_len, d_model)
-        return self.lm_head(x)  # (..., seq_len, vocab_size)
+
+class TransformerLMPostNorm(TransformerLMBase):
+    """Transformer Language Model with post-norm Transformer blocks."""
+
+    def __init__(  # noqa: PLR0913
+        self,
+        vocab_size: int,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        context_length: int,
+        n_layers: int,
+        rope: RotaryPositionalEmbedding | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        """Initialize Transformer Language Model with post-norm Transformer blocks."""
+        block_factory = partial(
+            TransformerBlock,
+            d_model=d_model,
+            num_heads=num_heads,
+            d_ff=d_ff,
+            rope=rope,
+            context_length=context_length,
+            device=device,
+            dtype=dtype,
+            norm_strategy="post",
+        )
+        super().__init__(
+            vocab_size=vocab_size,
+            d_model=d_model,
+            n_layers=n_layers,
+            block_factory=block_factory,
+            add_final_norm=True,
+            device=device,
+            dtype=dtype,
+        )
+
+
+class TransformerLMNoRope(TransformerLMBase):
+    """Transformer Language Model without RoPE."""
+
+    def __init__(  # noqa: PLR0913
+        self,
+        vocab_size: int,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        context_length: int,
+        n_layers: int,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        """Initialize Transformer Language Model without RoPE."""
+        block_factory = partial(
+            TransformerBlock,
+            d_model=d_model,
+            num_heads=num_heads,
+            d_ff=d_ff,
+            rope=None,
+            context_length=context_length,
+            device=device,
+            dtype=dtype,
+            norm_strategy="pre",
+        )
+        super().__init__(
+            vocab_size=vocab_size,
+            d_model=d_model,
+            n_layers=n_layers,
+            block_factory=block_factory,
+            add_final_norm=True,
+            device=device,
+            dtype=dtype,
+        )
+
+
+class TransformerLMSiLU(TransformerLMBase):
+    """Transformer Language Model with SiLU feed-forward network."""
+
+    def __init__(  # noqa: PLR0913
+        self,
+        vocab_size: int,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        context_length: int,
+        n_layers: int,
+        rope: RotaryPositionalEmbedding | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        """Initialize Transformer Language Model with SiLU feed-forward network."""
+        block_factory = partial(
+            TransformerBlock,
+            d_model=d_model,
+            num_heads=num_heads,
+            d_ff=d_ff,
+            rope=rope,
+            context_length=context_length,
+            device=device,
+            dtype=dtype,
+            norm_strategy="pre",
+            ffn_factory=SiLU,
+        )
+        super().__init__(
+            vocab_size=vocab_size,
+            d_model=d_model,
+            n_layers=n_layers,
+            block_factory=block_factory,
+            add_final_norm=True,
+            device=device,
+            dtype=dtype,
+        )
