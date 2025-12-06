@@ -441,3 +441,7 @@ Replacing SwiGLU with SiLU in the feed-forward network results in a higher final
 This shows that training on OpenWebText with same model and hyperparameters leads to same speed of loss decrease, but the final loss is significantly higer than training on TinyStories.
 
 This maybe due to the initial diffculty of tow datasets, the loss of starting point on OWT is much higher than that on TinyStories. But the tow loss curves have similar shapes.
+
+### leaderboard
+
+[config](config/train_owt.json) will get val_loss of 3.809385, a bigger learing rate will get better result.
