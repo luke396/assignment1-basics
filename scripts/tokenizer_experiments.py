@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Final
 
 import numpy as np
 
-from .tokenizer import Tokenier
+from cs336_basics.tokenizer import Tokenier
 
 if TYPE_CHECKING:
     from collections.abc import Generator

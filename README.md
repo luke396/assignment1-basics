@@ -1,5 +1,14 @@
 # CS336 Spring 2025 Assignment 1: Basics
 
+## Optional dependencies (experiments/plots)
+
+Experiment/profiling scripts live in `scripts/`. Install the extras with:
+
+```sh
+uv sync --extra experiments
+# or: pip install -e '.[experiments]'
+```
+
 ## 2. Byte-Pair Encoding (BPE) Tokenizer
 
 ### unicode1
@@ -73,6 +82,8 @@ Top 5 longest tokens (by bytes):
 uv run py-spy record -o bpe_profile.svg -- python cs336_basics/bpe.py
 ```
 
+Note: `py-spy`/`scalene` live in the `experiments` extra (see Optional dependencies above).
+
 ![bpe_profile.svg](./output/bpe_profile.svg)
 
 > We get the flame graph, and we can see that the most time-consuming part is the `_apply_merge` function, which updates the token count using the increase method.
@@ -124,7 +135,7 @@ Some of the longest tokens appear unusual, but the training data actually contai
 (a) (b)
 
 ```shell
-> python -m cs336_basics.tokenizer_experiments
+> uv run python scripts/tokenizer_experiments.py
 TS sample with TS tokenizer:  [118, 868, 500, 507, 266, 324, 616, 372, 263, 917, 473]
 tokenizer's compression ratio: 3.73
 TS sample with OWT tokenizer:  [118, 803, 699, 414, 284, 309, 11045, 288, 262, 7763, 3576]
@@ -370,6 +381,8 @@ Total training time estimate (days) for batch size 1024 and 400k steps on single
 [training_utility](cs336_basics/training_utility.py) 's generate function.
 
 ## 7. Experiments
+
+Plots are generated via `uv run python scripts/experiments.py`.
 
 ### learning_rate
 

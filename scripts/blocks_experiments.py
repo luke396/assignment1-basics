@@ -1,6 +1,6 @@
 """Experiments for blocks.py."""
 
-from .blocks import RotaryPositionalEmbedding, TransformerLM
+from cs336_basics.blocks import RotaryPositionalEmbedding, TransformerLM
 
 GPT2XL_CONFIG = {
     "vocab_size": 50257,

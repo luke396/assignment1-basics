@@ -14,17 +14,21 @@ dependencies = [
     "regex>=2024.11.6",                                                        # more powerful regex than the builtin `re` module
     "submitit>=1.5.2",                                                         # job submission for SLURM
     "tiktoken>=0.9.0",
-    "torch~=2.9.1; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "torch~=2.6.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "torch~=2.2.2; sys_platform == 'darwin' and platform_machine == 'x86_64'", # Intel Macs
     "tqdm>=4.67.1",
     "wandb>=0.19.7",
     "ty>=0.0.1a16",
-    "py-spy>=0.4.1",
-    "msgpack>=1.1.2",
-    "memray>=1.19.1",
     "ruff>=0.14.1",
-    "scalene>=1.5.55",
+]
+
+[project.optional-dependencies]
+experiments = [
     "matplotlib>=3.10.7",
+    "py-spy>=0.4.1",
+    "scalene>=1.5.55",
+    "memray>=1.19.1",
+    "msgpack>=1.1.2",
 ]
 
 [build-system]
@@ -48,17 +52,14 @@ addopts = "-s"
 line-length = 88
 extend-exclude = [
     "tests",
-    "cs336_basics/pretokenization_example.py",
-    "cs336_basics/blocks_experiments.py",
-    "cs336_basics/training_utility_experiments.py",
-    "cs336_basics/experiments.py",
+    "scripts",
 ]
 
 [tool.ruff.lint.extend-per-file-ignores]
 # Also ignore `E402` in all `__init__.py` files.
 "__init__.py" = ["E402", "F401", "F403", "E501"]
 "cs336_basics/utility.py" = ["T201"]
-"cs336_basics/tokenizer_experiments.py" = ["T201"]
+"scripts/tokenizer_experiments.py" = ["T201"]
 
 [tool.ruff.lint]
 select = ["ALL"]
