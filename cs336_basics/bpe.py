@@ -34,7 +34,7 @@ MergePair: TypeAlias = tuple[int, int]
 MergeHeapEntry: TypeAlias = tuple[int, tuple[int, ...], tuple[int, ...], int, int, int]
 TokenIdSplit: TypeAlias = list[int]
 
-WORKER_REGEX_CACHE: dict[str, re.Pattern | None] = {}
+WORKER_REGEX_CACHE: dict[str, re.Pattern[str] | None] = {}
 SPECIAL_TOKEN_SET: set[str] = set()
 
 

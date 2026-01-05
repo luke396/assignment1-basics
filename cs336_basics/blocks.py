@@ -243,7 +243,7 @@ class RotaryPositionalEmbedding(nn.Module):
         assert d_k % 2 == 0, "d_k must be even for RoPE."
         super().__init__()
 
-        inv_freq: torch.Tensor = 1.0 / (
+        inv_freq = 1.0 / (
             theta ** (torch.arange(0, d_k, 2, device=device, dtype=torch.float32) / d_k)
         )
         self.register_buffer("inv_freq", inv_freq)

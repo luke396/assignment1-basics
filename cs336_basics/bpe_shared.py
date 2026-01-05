@@ -15,18 +15,18 @@ PATTERN: Final[str] = (
 )
 
 # Module-level caches to avoid recompiling regex patterns.
-COMPILED_TOKEN_PATTERNS: dict[str, re.Pattern] = {}
-COMPILED_SPECIAL_SPLIT_PATTERNS: dict[tuple[str, tuple[str, ...]], re.Pattern] = {}
+COMPILED_TOKEN_PATTERNS: dict[str, re.Pattern[str]] = {}
+COMPILED_SPECIAL_SPLIT_PATTERNS: dict[tuple[str, tuple[str, ...]], re.Pattern[str]] = {}
 
 
-def get_or_compile_pattern(pattern: str) -> re.Pattern:
+def get_or_compile_pattern(pattern: str) -> re.Pattern[str]:
     """Return a cached regex pattern for the provided pattern string."""
     return COMPILED_TOKEN_PATTERNS.setdefault(pattern, re.compile(pattern))
 
 
 def get_or_compile_special_split_pattern(
     special_tokens: Sequence[str],
-) -> re.Pattern | None:
+) -> re.Pattern[str] | None:
     """Return a cached regex that isolates special tokens during pre-tokenisation."""
     if not special_tokens:
         return None
