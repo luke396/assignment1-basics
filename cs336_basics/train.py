@@ -14,10 +14,6 @@ import torch
 from cs336_basics.blocks import (
     RotaryPositionalEmbedding,
     TransformerLM,
-    TransformerLMNoRMSNorm,
-    TransformerLMNoRope,
-    TransformerLMPostNorm,
-    TransformerLMSiLU,
 )
 from cs336_basics.training_utility import (
     AdamW,
@@ -44,10 +40,9 @@ class TrainConfig:
     num_heads: int = 12
     d_ff: int = 3072
     n_layers: int = 12
-    remove_rmsnorm: bool = False
-    post_norm: bool = False
-    no_rope: bool = False
-    silu: bool = False
+    norm_strategy: str = "pre"
+    ffn_type: str = "swiglu"
+    use_rope: bool = True
 
     lr: float = 1e-4
     min_lr: float | None = None
@@ -140,30 +135,24 @@ class TrainConfig:
             help="Number of transformer layers.",
         )
         parser.add_argument(
-            "--remove-rmsnorm",
-            action=argparse.BooleanOptionalAction,
-            default=cls.remove_rmsnorm,
-            help="Build transformer blocks without RMSNorm layers.",
+            "--norm-strategy",
+            type=str,
+            default=cls.norm_strategy,
+            choices=["pre", "post", "none"],
+            help="Normalization strategy: 'pre' (default), 'post', or 'none'.",
         )
         parser.add_argument(
-            "--post-norm",
-            action=argparse.BooleanOptionalAction,
-            default=cls.post_norm,
-            help="Build transformer blocks with post-norm RMSNorm layers.",
+            "--ffn-type",
+            type=str,
+            default=cls.ffn_type,
+            choices=["swiglu", "silu"],
+            help="Feed-forward network type: 'swiglu' (default) or 'silu'.",
         )
         parser.add_argument(
-            "--no-rope",
+            "--use-rope",
             action=argparse.BooleanOptionalAction,
-            default=cls.no_rope,
-            help=(
-                "Build transformer blocks without rotary positional embeddings (RoPE)."
-            ),
-        )
-        parser.add_argument(
-            "--silu",
-            action=argparse.BooleanOptionalAction,
-            default=cls.silu,
-            help="Build transformer blocks with SiLU feed-forward networks.",
+            default=cls.use_rope,
+            help="Use rotary positional embeddings (RoPE).",
         )
         parser.add_argument(
             "--lr",
@@ -314,15 +303,6 @@ class TrainConfig:
         return cls(**parsed_dict)
 
 
-TransformerModel = (
-    TransformerLM
-    | TransformerLMNoRMSNorm
-    | TransformerLMPostNorm
-    | TransformerLMNoRope
-    | TransformerLMSiLU
-)
-
-
 class BatchLoader:
     """Stateful batch sampler with controllable RNG for reproducibility."""
 
@@ -468,65 +448,27 @@ def build_data_sources(
 
 def build_model_and_optimizer(
     config: TrainConfig,
-) -> tuple[TransformerModel, AdamW]:
+) -> tuple[TransformerLM, AdamW]:
     """Instantiate model, positional embedding, and optimizer."""
-    rope = RotaryPositionalEmbedding(
-        100000.0, config.d_model // config.num_heads, config.context_length
+    rope = (
+        RotaryPositionalEmbedding(
+            100000.0, config.d_model // config.num_heads, config.context_length
+        )
+        if config.use_rope
+        else None
     )
-    if config.remove_rmsnorm:
-        model: TransformerModel = TransformerLMNoRMSNorm(
-            config.vocab_size,
-            config.d_model,
-            config.num_heads,
-            config.d_ff,
-            config.context_length,
-            config.n_layers,
-            rope,
-            dtype=torch.float32,
-        )
-    elif config.post_norm:
-        model = TransformerLMPostNorm(
-            config.vocab_size,
-            config.d_model,
-            config.num_heads,
-            config.d_ff,
-            config.context_length,
-            config.n_layers,
-            rope,
-            dtype=torch.float32,
-        )
-    elif config.no_rope:
-        model = TransformerLMNoRope(
-            config.vocab_size,
-            config.d_model,
-            config.num_heads,
-            config.d_ff,
-            config.context_length,
-            config.n_layers,
-            dtype=torch.float32,
-        )
-    elif config.silu:
-        model = TransformerLMSiLU(
-            config.vocab_size,
-            config.d_model,
-            config.num_heads,
-            config.d_ff,
-            config.context_length,
-            config.n_layers,
-            rope,
-            dtype=torch.float32,
-        )
-    else:
-        model = TransformerLM(
-            config.vocab_size,
-            config.d_model,
-            config.num_heads,
-            config.d_ff,
-            config.context_length,
-            config.n_layers,
-            rope,
-            dtype=torch.float32,
-        )
+    model = TransformerLM(
+        config.vocab_size,
+        config.d_model,
+        config.num_heads,
+        config.d_ff,
+        config.context_length,
+        config.n_layers,
+        rope,
+        dtype=torch.float32,
+        norm_strategy=config.norm_strategy,
+        ffn_type=config.ffn_type,
+    )
     model.to(config.device)
     optimizer = AdamW(
         model.parameters(), lr=config.lr, weight_decay=config.weight_decay
@@ -541,7 +483,7 @@ def apply_learning_rate(optimizer: AdamW, lr_now: float) -> None:
 
 
 def run_train_step(
-    model: TransformerModel,
+    model: TransformerLM,
     optimizer: AdamW,
     train_loader: BatchLoader,
     config: TrainConfig,
@@ -559,7 +501,7 @@ def run_train_step(
 
 
 def run_validation(
-    model: TransformerModel,
+    model: TransformerLM,
     val_loader: BatchLoader,
     config: TrainConfig,
 ) -> float:

@@ -30,5 +30,5 @@
   "run_name": "tinystories_no_rope",
   "log_interval": 100,
 
-  "no_rope": true
+  "use_rope": false
 }

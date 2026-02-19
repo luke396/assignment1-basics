@@ -30,5 +30,5 @@
   "run_name": "tinystories_silu",
   "log_interval": 100,
 
-  "silu": true
+  "ffn_type": "silu"
 }
