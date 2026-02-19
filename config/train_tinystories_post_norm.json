@@ -30,5 +30,5 @@
   "run_name": "tinystories_post_norm",
   "log_interval": 100,
 
-  "post_norm": true
+  "norm_strategy": "post"
 }

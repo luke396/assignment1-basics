@@ -30,5 +30,5 @@
   "run_name": "tinystories_rmsnorm_free",
   "log_interval": 100,
 
-  "remove_rmnorm": true
+  "norm_strategy": "none"
 }
