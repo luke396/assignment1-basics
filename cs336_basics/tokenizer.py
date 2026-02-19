@@ -19,7 +19,7 @@ from .bpe_shared import (
 )
 
 
-class Tokenier:
+class Tokenizer:
     """Tokenizer implementing byte-pair encoding merges with caching support."""
 
     def __init__(
@@ -59,7 +59,7 @@ class Tokenier:
         vocab_filepath: str,
         merges_filepath: str,
         special_tokens: list[str] | None = None,
-    ) -> Tokenier:
+    ) -> Tokenizer:
         """Create a tokenizer instance from serialized vocabulary and merges."""
         project_root = Path(__file__).parent.parent
         vocab_path = project_root / vocab_filepath
@@ -295,7 +295,7 @@ class PreTokenDoubleLinkedList:
 
 
 if __name__ == "__main__":
-    t = Tokenier.from_files(
+    t = Tokenizer.from_files(
         vocab_filepath="data/tokenizer_vocab_owt_train_32000.json",
         merges_filepath="data/tokenizer_merges_owt_train_32000.json",
     )

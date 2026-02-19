@@ -11,7 +11,7 @@ from torch import Tensor
 
 from cs336_basics.blocks import Embedding, Linear, RMSNorm, RotaryPositionalEmbedding, SwiGLU, TransformerBlock, TransformerLM, softmax, scaled_dot_product_attention, MultiheadSelfAttention
 from cs336_basics.bpe import train_bpe
-from cs336_basics.tokenizer import Tokenier
+from cs336_basics.tokenizer import Tokenizer
 from cs336_basics.training_utility import (
     AdamW,
     cross_entropy,
@@ -640,7 +640,7 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    return Tokenier(vocab, merges, special_tokens)
+    return Tokenizer(vocab, merges, special_tokens)
 
 
 def run_train_bpe(

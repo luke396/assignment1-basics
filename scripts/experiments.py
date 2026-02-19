@@ -6,7 +6,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 
-from cs336_basics.tokenizer import Tokenier
+from cs336_basics.tokenizer import Tokenizer
 from cs336_basics.train import TrainConfig, build_model_and_optimizer
 from cs336_basics.training_utility import generate as generate_tokens
 from cs336_basics.training_utility import load_checkpoint
@@ -345,7 +345,7 @@ def generate_text(
     config: TrainConfig,
     checkpoint_path: str | Path,
     prompt: str,
-    tokenizer: Tokenier | None = None,
+    tokenizer: Tokenizer | None = None,
     tokenizer_vocab_path: str | None = None,
     tokenizer_merges_path: str | None = None,
     max_new_tokens: int = 1000,
@@ -360,7 +360,7 @@ def generate_text(
                 "tokenizer_merges_path."
             )
             raise ValueError(msg)
-        tokenizer = Tokenier.from_files(
+        tokenizer = Tokenizer.from_files(
             tokenizer_vocab_path,
             tokenizer_merges_path,
             special_tokens=["<|endoftext|>"],

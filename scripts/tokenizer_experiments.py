@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Final
 
 import numpy as np
 
-from cs336_basics.tokenizer import Tokenier
+from cs336_basics.tokenizer import Tokenizer
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -43,7 +43,7 @@ class TokenizerStats:
     maxsize: int
 
 
-def qab(ts_tokenizer: Tokenier, owt_tokenizer: Tokenier) -> None:
+def qab(ts_tokenizer: Tokenizer, owt_tokenizer: Tokenizer) -> None:
     """Compare tokenizer compression ratios on representative samples."""
     ts_valid_sample = "u don't have to be scared of the loud dog"
     owt_valid_sample = (
@@ -87,7 +87,7 @@ def qab(ts_tokenizer: Tokenier, owt_tokenizer: Tokenier) -> None:
     )
 
 
-def qc(ts_tokenizer: Tokenier, owt_tokenizer: Tokenier) -> None:
+def qc(ts_tokenizer: Tokenizer, owt_tokenizer: Tokenizer) -> None:
     """Analyze dataset size characteristics and tokenizer performance."""
     valid_path = Path("data/TinyStoriesV2-GPT4-valid.txt")
     valid_data = valid_path.read_text(encoding="utf-8")
@@ -154,8 +154,8 @@ def _print_file_size_analysis(
 
 
 def _print_tokenizer_performance(
-    ts_tokenizer: Tokenier,
-    owt_tokenizer: Tokenier,
+    ts_tokenizer: Tokenizer,
+    owt_tokenizer: Tokenizer,
     valid_data: str,
     metrics: DatasetMetrics,
     pile_size_gb: int,
@@ -184,7 +184,7 @@ def _print_tokenizer_performance(
 
 
 def _benchmark_tokenizer(
-    tokenizer: Tokenier,
+    tokenizer: Tokenizer,
     valid_data: str,
     data_utf_len: int,
 ) -> TokenizerStats:
@@ -232,7 +232,7 @@ def _print_tokenizer_stats(
     )
 
 
-def qd(ts_tokenizer: Tokenier, owt_tokenizer: Tokenier) -> None:
+def qd(ts_tokenizer: Tokenizer, owt_tokenizer: Tokenizer) -> None:
     """Encode datasets with both tokenizers and persist token IDs to disk."""
     _encode(
         ts_tokenizer,
@@ -249,7 +249,7 @@ def qd(ts_tokenizer: Tokenier, owt_tokenizer: Tokenier) -> None:
 
 
 def _encode(
-    tokenizer: Tokenier,
+    tokenizer: Tokenizer,
     data_path: str | Path,
     save_path: str | Path,
     chunk_size: int = 1024 * 1024,
@@ -344,11 +344,11 @@ def _encode(
 
 
 if __name__ == "__main__":
-    ts_tokenizer = Tokenier.from_files(
+    ts_tokenizer = Tokenizer.from_files(
         vocab_filepath="data/tokenizer_vocab_TinyStoriesV2-GPT4-train_10000.json",
         merges_filepath="data/tokenizer_merges_TinyStoriesV2-GPT4-train_10000.json",
     )
-    owt_tokenizer = Tokenier.from_files(
+    owt_tokenizer = Tokenizer.from_files(
         vocab_filepath="data/tokenizer_vocab_owt_train_32000.json",
         merges_filepath="data/tokenizer_merges_owt_train_32000.json",
     )

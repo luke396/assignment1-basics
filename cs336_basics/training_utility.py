@@ -15,7 +15,7 @@ from cs336_basics.blocks import softmax
 if typing.TYPE_CHECKING:
     import os
 
-    from cs336_basics.tokenizer import Tokenier
+    from cs336_basics.tokenizer import Tokenizer
 
 
 def cross_entropy(inputs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -80,7 +80,7 @@ class AdamW(torch.optim.Optimizer):
             Loss value produced by `closure` when provided; otherwise `None`.
 
         """
-        if closure is not None and not isinstance(closure, Callable):
+        if closure is not None and not callable(closure):
             msg = "closure must be callable returning a loss tensor."
             raise TypeError(msg)
 
@@ -122,9 +122,6 @@ class AdamW(torch.optim.Optimizer):
                 p.data.add_(p.data, alpha=-lr * weight_decay)
                 p.data.addcdiv_(m, denom, value=-step_size)
 
-                state["m"] = m
-                state["v"] = v
-
         return loss
 
 
@@ -149,9 +146,9 @@ def lr_cosine_schedule(
         Learning rate at the current step.
 
     """
-    if it < warmup_iters:
+    if warmup_iters > 0 and it < warmup_iters:
         return it * max_learning_rate / warmup_iters
-    if warmup_iters <= it <= cosine_cycle_iters:
+    if it <= cosine_cycle_iters and cosine_cycle_iters > warmup_iters:
         progress = (it - warmup_iters) / (cosine_cycle_iters - warmup_iters)
         cos_decay = 0.5 * (1 + math.cos(math.pi * progress))
         return min_learning_rate + cos_decay * (max_learning_rate - min_learning_rate)
@@ -231,7 +228,7 @@ def load_checkpoint(
     optimizer: torch.optim.Optimizer,
 ) -> int:
     """Load model and optimizer state from a checkpoint file."""
-    checkpoint = torch.load(src)
+    checkpoint = torch.load(src, weights_only=True)
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     return checkpoint["iteration"]
@@ -239,7 +236,7 @@ def load_checkpoint(
 
 def generate(  # noqa: PLR0913
     model: torch.nn.Module,
-    tokenizer: Tokenier,
+    tokenizer: Tokenizer,
     prompt: str,
     max_new_tokens: int,
     temperature: float = 1.0,
