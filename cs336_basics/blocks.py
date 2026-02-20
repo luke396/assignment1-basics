@@ -419,7 +419,7 @@ class MultiheadSelfAttention(nn.Module):
             q = self.rope(q, token_positions)
             k = self.rope(k, token_positions)
 
-        # it should behind rope, cause cahce kv has been rotated
+        # This should be after RoPE because cache kv has been rotated.
         if use_cache:
             if self.k_cache is not None and self.v_cache is not None:
                 k = torch.cat([self.k_cache, k], dim=-2)
