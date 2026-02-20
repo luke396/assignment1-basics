@@ -15,7 +15,7 @@ from cs336_basics.blocks import softmax
 if typing.TYPE_CHECKING:
     import os
 
-    from cs336_basics.tokenizer import Tokenier
+    from cs336_basics.tokenizer import Tokenizer
 
 
 def cross_entropy(inputs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -80,7 +80,7 @@ class AdamW(torch.optim.Optimizer):
             Loss value produced by `closure` when provided; otherwise `None`.
 
         """
-        if closure is not None and not isinstance(closure, Callable):
+        if closure is not None and not callable(closure):
             msg = "closure must be callable returning a loss tensor."
             raise TypeError(msg)
 
@@ -122,9 +122,6 @@ class AdamW(torch.optim.Optimizer):
                 p.data.add_(p.data, alpha=-lr * weight_decay)
                 p.data.addcdiv_(m, denom, value=-step_size)
 
-                state["m"] = m
-                state["v"] = v
-
         return loss
 
 
@@ -149,9 +146,9 @@ def lr_cosine_schedule(
         Learning rate at the current step.
 
     """
-    if it < warmup_iters:
+    if warmup_iters > 0 and it < warmup_iters:
         return it * max_learning_rate / warmup_iters
-    if warmup_iters <= it <= cosine_cycle_iters:
+    if it <= cosine_cycle_iters and cosine_cycle_iters > warmup_iters:
         progress = (it - warmup_iters) / (cosine_cycle_iters - warmup_iters)
         cos_decay = 0.5 * (1 + math.cos(math.pi * progress))
         return min_learning_rate + cos_decay * (max_learning_rate - min_learning_rate)
@@ -231,21 +228,79 @@ def load_checkpoint(
     optimizer: torch.optim.Optimizer,
 ) -> int:
     """Load model and optimizer state from a checkpoint file."""
-    checkpoint = torch.load(src)
+    checkpoint = torch.load(src, weights_only=True)
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     return checkpoint["iteration"]
 
 
-def generate(  # noqa: PLR0913
+def _sample_next_token(
+    logits: torch.Tensor,
+    temperature: float,
+    top_p: float,
+    rng: torch.Generator,
+) -> int:
+    """Sample a single token from model logits with temperature and top-p.
+
+    Args:
+        logits: Raw logits of shape (batch, seq_len, vocab_size).
+        temperature: Softmax temperature (>0).
+        top_p: Nucleus threshold in (0, 1].
+        rng: torch.Generator for reproducible sampling.
+
+    Returns:
+        Sampled token id.
+
+    """
+    probs = softmax(logits[:, -1, :].squeeze(0) / temperature, dim=-1)  # (vocab_size,)
+
+    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+
+    sorted_indices_to_remove = cumulative_probs > top_p
+    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+    sorted_indices_to_remove[..., 0] = False
+
+    sorted_probs = sorted_probs.masked_fill(sorted_indices_to_remove, 0.0)
+    full_probs = torch.zeros_like(probs)
+    full_probs[sorted_indices] = sorted_probs
+    full_probs = full_probs / full_probs.sum()
+
+    next_id = torch.multinomial(
+        full_probs,
+        num_samples=1,
+        generator=rng,
+    ).item()
+    return int(next_id)
+
+
+def _clamp_new_tokens(
+    max_new_tokens: int, prompt_len: int, max_seq_len: int | None
+) -> int:
+    """Clamp max_new_tokens so prompt + generated tokens fit in context."""
+    if max_seq_len is None:
+        return max_new_tokens
+    available = max_seq_len - prompt_len
+    if available <= 0:
+        msg = (
+            "Prompt length exceeds model context length "
+            f"({prompt_len} > {max_seq_len})."
+        )
+        raise ValueError(msg)
+    return min(max_new_tokens, available)
+
+
+def generate(  # noqa: PLR0913, C901
     model: torch.nn.Module,
-    tokenizer: Tokenier,
+    tokenizer: Tokenizer,
     prompt: str,
     max_new_tokens: int,
     temperature: float = 1.0,
     top_p: float = 1.0,
     rng: torch.Generator | None = None,
     context_length: int | None = None,
+    *,
+    use_cache: bool = False,
 ) -> str:
     """Generate text with temperature and top-p (nucleus) sampling.
 
@@ -261,6 +316,7 @@ def generate(  # noqa: PLR0913
         rng: Optional torch.Generator for reproducible sampling.
         context_length: Optional explicit maximum sequence length to enforce;
             if provided, overrides inferring from model buffers.
+        use_cache: If True, use KV cache for incremental decoding.
 
     Returns:
         The decoded text for the newly generated tokens (prompt excluded).
@@ -281,66 +337,55 @@ def generate(  # noqa: PLR0913
     device = next(model.parameters()).device  # same as model parametet's device
     prompt_tokens = tokenizer.encode(prompt)
     input_tokens = prompt_tokens.copy()
-
-    # Enforce the model's maximum sequence length to avoid RoPE index errors.
-    max_seq_len: int | None = context_length
-
-    if max_seq_len is not None:
-        available_tokens = max_seq_len - len(prompt_tokens)
-        if available_tokens <= 0:
-            msg = (
-                "Prompt length exceeds model context length "
-                f"({len(prompt_tokens)} > {max_seq_len})."
-            )
-            raise ValueError(msg)
-        max_new_tokens = min(max_new_tokens, available_tokens)
+    max_new_tokens = _clamp_new_tokens(
+        max_new_tokens, len(prompt_tokens), context_length
+    )
 
     rng = rng if rng is not None else torch.Generator(device=device)
 
     with torch.no_grad():
-        for _ in range(max_new_tokens):
+        if use_cache:
+            if max_new_tokens == 0:
+                return ""
+
+            # prefill the cache with the prompt tokens
+            model.clear_kv_cache()  # type: ignore[call-non-callable]
             logits = model(
                 torch.as_tensor(
-                    [input_tokens],
+                    [prompt_tokens],
                     device=device,
-                )
-            )  # (batch_size, sequence_len, vocab_size)
+                ),
+                use_cache=True,
+            )
+            next_id = _sample_next_token(logits, temperature, top_p, rng)
+            if next_id != end_id:
+                input_tokens.append(next_id)
 
-            # Temperature scaling
-            probs = softmax(
-                logits[:, -1, :].squeeze(0) / temperature, dim=-1
-            )  # (vocab_size,)
+                for _ in range(max_new_tokens - 1):
+                    pos = len(input_tokens) - 1
+                    logits = model(
+                        torch.as_tensor([[next_id]], device=device),
+                        token_positions=torch.tensor([pos], device=device),
+                        use_cache=True,
+                    )
+                    next_id = _sample_next_token(logits, temperature, top_p, rng)
+                    if next_id == end_id:
+                        break
+                    input_tokens.append(next_id)
 
-            # Top-p nucleus sampling
-            sorted_probs, sorted_indices = torch.sort(probs, descending=True)
-            cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+        else:
+            for _ in range(max_new_tokens):
+                logits = model(
+                    torch.as_tensor(
+                        [input_tokens],
+                        device=device,
+                    )
+                )  # (batch_size, sequence_len, vocab_size)
 
-            # Remove tokens with cumulative probability above the threshold
-            sorted_indices_to_remove = cumulative_probs > top_p
-            # Clone to avoid overlapping memory between source/dest slices
-            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[
-                ..., :-1
-            ].clone()
-            sorted_indices_to_remove[..., 0] = False
-
-            # Fill removed logits with zeros, and re-normalize
-            sorted_probs = sorted_probs.masked_fill(sorted_indices_to_remove, 0.0)
-            full_probs = torch.zeros_like(probs)
-            full_probs[sorted_indices] = sorted_probs
-            full_probs = full_probs / full_probs.sum()
-
-            next_id = torch.multinomial(
-                full_probs,
-                num_samples=1,
-                generator=rng,
-            ).item()
-            next_id = int(next_id)
-            if next_id == end_id:
-                break
-            input_tokens.append(next_id)
+                next_id = _sample_next_token(logits, temperature, top_p, rng)
+                if next_id == end_id:
+                    break
+                input_tokens.append(next_id)
 
     decoded = tokenizer.decode(input_tokens[len(prompt_tokens) :])
-    sentinel = "<|endoftext|>"
-    if sentinel in decoded:
-        decoded = decoded.split(sentinel, 1)[0]
-    return decoded
+    return decoded.split("<|endoftext|>", 1)[0]
