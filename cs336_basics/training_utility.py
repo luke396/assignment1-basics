@@ -290,7 +290,7 @@ def _clamp_new_tokens(
     return min(max_new_tokens, available)
 
 
-def generate(  # noqa: PLR0913
+def generate(  # noqa: PLR0913, C901
     model: torch.nn.Module,
     tokenizer: Tokenizer,
     prompt: str,
@@ -345,6 +345,9 @@ def generate(  # noqa: PLR0913
 
     with torch.no_grad():
         if use_cache:
+            if max_new_tokens == 0:
+                return ""
+
             # prefill the cache with the prompt tokens
             model.clear_kv_cache()  # type: ignore[call-non-callable]
             logits = model(

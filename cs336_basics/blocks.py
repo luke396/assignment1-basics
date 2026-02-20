@@ -430,8 +430,8 @@ class MultiheadSelfAttention(nn.Module):
                     f"context length {self.seq_len}"
                 )
                 raise ValueError(msg)
-            self.k_cache = k
-            self.v_cache = v
+            self.k_cache = k.detach()
+            self.v_cache = v.detach()
 
         # True for positions to keep, False to mask
         q_len = q.shape[-2]
