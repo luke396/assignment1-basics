@@ -364,13 +364,28 @@ class MultiheadSelfAttention(nn.Module):
                 persistent=False,
             )
 
+        self.register_buffer(
+            "k_cache",
+            None,
+            persistent=False,
+        )
+        self.register_buffer(
+            "v_cache",
+            None,
+            persistent=False,
+        )
+
         self.q_proj = Linear(d_model, d_model, **factory_kwargs)
         self.k_proj = Linear(d_model, d_model, **factory_kwargs)
         self.v_proj = Linear(d_model, d_model, **factory_kwargs)
         self.output_proj = Linear(d_model, d_model, **factory_kwargs)
 
     def forward(
-        self, in_features: torch.Tensor, token_positions: torch.Tensor | None = None
+        self,
+        in_features: torch.Tensor,
+        token_positions: torch.Tensor | None = None,
+        *,
+        use_cache: bool = False,
     ) -> torch.Tensor:
         """Apply multi-head self-attention.
 
@@ -378,6 +393,7 @@ class MultiheadSelfAttention(nn.Module):
             in_features: Input tensor of shape (..., seq_len, d_model).
             token_positions: Optional token position indices of shape (seq_len,).
                 Will broadcast automatically to match batch and head dimensions.
+            use_cache: If True, use and update the KV cache for incremental decoding.
 
         Returns:
             Output tensor of shape (..., seq_len, d_model).
@@ -403,18 +419,26 @@ class MultiheadSelfAttention(nn.Module):
             q = self.rope(q, token_positions)
             k = self.rope(k, token_positions)
 
+        # it should behind rope, cause cahce kv has been rotated
+        if use_cache:
+            if self.k_cache is not None and self.v_cache is not None:
+                k = torch.cat([self.k_cache, k], dim=-2)
+                v = torch.cat([self.v_cache, v], dim=-2)
+            self.k_cache = k
+            self.v_cache = v
+
         # True for positions to keep, False to mask
-        seq_len = in_features.shape[-2]
+        q_len = q.shape[-2]
+        k_len = k.shape[-2]
+
         if not self.seq_len:
             mask = torch.tril(
-                torch.ones(
-                    (seq_len, seq_len), device=in_features.device, dtype=torch.bool
-                ),
-                diagonal=0,
+                torch.ones((q_len, k_len), device=in_features.device, dtype=torch.bool),
+                diagonal=k_len - q_len,
             )
         else:
             assert isinstance(self.mask, torch.Tensor)
-            mask = self.mask[:seq_len, :seq_len]
+            mask = self.mask[k_len - q_len : k_len, :k_len]
 
         attention_output = scaled_dot_product_attention(
             q, k, v, mask=mask
@@ -426,6 +450,11 @@ class MultiheadSelfAttention(nn.Module):
             attention_output, "... heads seq d_k -> ... seq (heads d_k)"
         )
         return self.output_proj(attention_output)
+
+    def clear_kv_cache(self) -> None:
+        """Clear the key and value caches."""
+        self.k_cache = None
+        self.v_cache = None
 
 
 class TransformerBlock(nn.Module):
@@ -528,7 +557,11 @@ class TransformerBlock(nn.Module):
         return self._pos_cache[:seq_len]  # type: ignore[index]
 
     def forward(
-        self, x: torch.Tensor, token_positions: torch.Tensor | None = None
+        self,
+        x: torch.Tensor,
+        token_positions: torch.Tensor | None = None,
+        *,
+        use_cache: bool = False,
     ) -> torch.Tensor:
         """Apply Transformer block."""
         if token_positions is None:
@@ -536,18 +569,18 @@ class TransformerBlock(nn.Module):
 
         if self.norm_strategy == "pre":
             attn_in = self.ln1(x) if self.ln1 is not None else x
-            x1 = x + self.attn(attn_in, token_positions)
+            x1 = x + self.attn(attn_in, token_positions, use_cache=use_cache)
             ffn_in = self.ln2(x1) if self.ln2 is not None else x1
             return x1 + self.ffn(ffn_in)
 
         if self.norm_strategy == "post":
-            x1 = x + self.attn(x, token_positions)
+            x1 = x + self.attn(x, token_positions, use_cache=use_cache)
             x1 = self.ln1(x1) if self.ln1 is not None else x1
             x2 = x1 + self.ffn(x1)
             return self.ln2(x2) if self.ln2 is not None else x2
 
         # norm_strategy == "none"  # noqa: ERA001
-        x1 = x + self.attn(x, token_positions)
+        x1 = x + self.attn(x, token_positions, use_cache=use_cache)
         return x1 + self.ffn(x1)
 
 
@@ -591,12 +624,24 @@ class TransformerLM(nn.Module):
         self.lm_head = Linear(d_model, vocab_size, **factory_kwargs)
 
     def forward(
-        self, in_indices: torch.Tensor, token_positions: torch.Tensor | None = None
+        self,
+        in_indices: torch.Tensor,
+        token_positions: torch.Tensor | None = None,
+        *,
+        use_cache: bool = False,
     ) -> torch.Tensor:
         """Apply Transformer Language Model."""
         x = self.token_embeddings(in_indices)  # (..., seq_len, d_model)
         for block in self.layers:
-            x = block(x, token_positions)  # (..., seq_len, d_model)
+            x = block(
+                x, token_positions, use_cache=use_cache
+            )  # (..., seq_len, d_model)
         if self.ln_final is not None:
             x = self.ln_final(x)  # (..., seq_len, d_model)
         return self.lm_head(x)  # (..., seq_len, vocab_size)
+
+    def clear_kv_cache(self) -> None:
+        """Clear KV cache for all attention layers."""
+        for block in self.layers:
+            if isinstance(block, TransformerBlock):
+                block.attn.clear_kv_cache()
