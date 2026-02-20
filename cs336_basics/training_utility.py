@@ -355,19 +355,20 @@ def generate(  # noqa: PLR0913
                 use_cache=True,
             )
             next_id = _sample_next_token(logits, temperature, top_p, rng)
-            input_tokens.append(next_id)
-
-            for _ in range(max_new_tokens - 1):
-                pos = len(input_tokens) - 1
-                logits = model(
-                    torch.as_tensor([[next_id]], device=device),
-                    token_positions=torch.tensor([pos], device=device),
-                    use_cache=True,
-                )
-                next_id = _sample_next_token(logits, temperature, top_p, rng)
-                if next_id == end_id:
-                    break
+            if next_id != end_id:
                 input_tokens.append(next_id)
+
+                for _ in range(max_new_tokens - 1):
+                    pos = len(input_tokens) - 1
+                    logits = model(
+                        torch.as_tensor([[next_id]], device=device),
+                        token_positions=torch.tensor([pos], device=device),
+                        use_cache=True,
+                    )
+                    next_id = _sample_next_token(logits, temperature, top_p, rng)
+                    if next_id == end_id:
+                        break
+                    input_tokens.append(next_id)
 
         else:
             for _ in range(max_new_tokens):

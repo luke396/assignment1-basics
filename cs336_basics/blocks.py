@@ -419,11 +419,17 @@ class MultiheadSelfAttention(nn.Module):
             q = self.rope(q, token_positions)
             k = self.rope(k, token_positions)
 
-        # This should be after RoPE because cache kv has been rotated.
+        # This should be after RoPE because cached KV has already been rotated.
         if use_cache:
             if self.k_cache is not None and self.v_cache is not None:
                 k = torch.cat([self.k_cache, k], dim=-2)
                 v = torch.cat([self.v_cache, v], dim=-2)
+            if self.seq_len and k.shape[-2] > self.seq_len:
+                msg = (
+                    f"KV cache length {k.shape[-2]} exceeds "
+                    f"context length {self.seq_len}"
+                )
+                raise ValueError(msg)
             self.k_cache = k
             self.v_cache = v
 
@@ -563,7 +569,20 @@ class TransformerBlock(nn.Module):
         *,
         use_cache: bool = False,
     ) -> torch.Tensor:
-        """Apply Transformer block."""
+        """Apply Transformer block.
+
+        Args:
+            x: Input tensor of shape (..., seq_len, d_model).
+            token_positions: Optional tensor of position indices of shape
+                (seq_len,). If None, positions are obtained from the internal
+                position cache via :meth:`_get_positions`.
+            use_cache: If True, use and update the KV cache for incremental
+                decoding.
+
+        Returns:
+            Output tensor of shape (..., seq_len, d_model).
+
+        """
         if token_positions is None:
             token_positions = self._get_positions(x)
 
@@ -630,7 +649,20 @@ class TransformerLM(nn.Module):
         *,
         use_cache: bool = False,
     ) -> torch.Tensor:
-        """Apply Transformer Language Model."""
+        """Apply Transformer Language Model.
+
+        Args:
+            in_indices: Input token indices of shape (..., seq_len).
+            token_positions: Optional token position indices of shape
+                (..., seq_len). If None, positions are inferred from the
+                internal position cache.
+            use_cache: If True, use and update the KV cache for incremental
+                decoding.
+
+        Returns:
+            Logits over the vocabulary of shape (..., seq_len, vocab_size).
+
+        """
         x = self.token_embeddings(in_indices)  # (..., seq_len, d_model)
         for block in self.layers:
             x = block(
