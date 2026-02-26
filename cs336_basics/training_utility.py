@@ -343,7 +343,7 @@ def generate(  # noqa: PLR0913, C901
 
     rng = rng if rng is not None else torch.Generator(device=device)
 
-    with torch.no_grad():
+    with torch.inference_mode():
         if use_cache:
             if max_new_tokens == 0:
                 return ""

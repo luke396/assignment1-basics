@@ -509,7 +509,7 @@ def run_validation(
     model.eval()
     val_loader.reset()
     val_losses: list[float] = []
-    with torch.no_grad():
+    with torch.inference_mode():
         for _ in range(config.val_batches):
             val_inputs, val_targets = val_loader.next_batch()
             val_logits = model(val_inputs)
