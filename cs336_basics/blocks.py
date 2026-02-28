@@ -1,12 +1,30 @@
 """Blocks implementation for llm."""
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import partial
 from typing import Literal
 
 import torch
 from einops import einsum, rearrange
 from torch import nn
+
+from cs336_basics.paged_attention import KVCacheManager, paged_attention_decode
+
+
+@dataclass
+class PagedCacheContext:
+    """Context for paged KV cache operations in continuous batching."""
+
+    kv_manager: KVCacheManager
+    layer_idx: int
+    mode: Literal["prefill", "decode"]
+    # prefill
+    prefill_seq_id: int | None = None
+    # decode
+    decode_seq_ids: list[int] | None = None
+    block_tables: torch.Tensor | None = None
+    seq_lens: torch.Tensor | None = None
 
 
 class Linear(nn.Module):
@@ -386,6 +404,7 @@ class MultiheadSelfAttention(nn.Module):
         token_positions: torch.Tensor | None = None,
         *,
         use_cache: bool = False,
+        paged_ctx: PagedCacheContext | None = None,
     ) -> torch.Tensor:
         """Apply multi-head self-attention.
 
@@ -394,6 +413,8 @@ class MultiheadSelfAttention(nn.Module):
             token_positions: Optional token position indices of shape (seq_len,).
                 Will broadcast automatically to match batch and head dimensions.
             use_cache: If True, use and update the KV cache for incremental decoding.
+            paged_ctx: Optional paged cache context for paged KV cache with
+                continuous batching.
 
         Returns:
             Output tensor of shape (..., seq_len, d_model).
@@ -420,7 +441,9 @@ class MultiheadSelfAttention(nn.Module):
             k = self.rope(k, token_positions)
 
         # This should be after RoPE because cached KV has already been rotated.
-        if use_cache:
+        if paged_ctx is not None:  # paged kv cache with continuous batching
+            attention_output = self._paged_attention(q, k, v, paged_ctx)
+        elif use_cache:  # naive kv cache
             if self.k_cache is not None and self.v_cache is not None:
                 k = torch.cat([self.k_cache, k], dim=-2)
                 v = torch.cat([self.v_cache, v], dim=-2)
@@ -432,30 +455,92 @@ class MultiheadSelfAttention(nn.Module):
                 raise ValueError(msg)
             self.k_cache = k.detach()
             self.v_cache = v.detach()
-
-        # True for positions to keep, False to mask
-        q_len = q.shape[-2]
-        k_len = k.shape[-2]
-
-        if not self.seq_len:
-            mask = torch.tril(
-                torch.ones((q_len, k_len), device=in_features.device, dtype=torch.bool),
-                diagonal=k_len - q_len,
-            )
+            attention_output = scaled_dot_product_attention(
+                q, k, v
+            )  # (..., num_heads, seq_len, d_k)
         else:
-            assert isinstance(self.mask, torch.Tensor)
-            mask = self.mask[k_len - q_len : k_len, :k_len]
+            # no caching, full attention + causal mask
+            # used for training or totally naive decoding
+            # True for positions to keep, False to mask
+            q_len = q.shape[-2]
+            k_len = k.shape[-2]
 
-        attention_output = scaled_dot_product_attention(
-            q, k, v, mask=mask
-        )  # (..., num_heads, seq_len, d_k)
+            if not self.seq_len:
+                mask = torch.tril(
+                    torch.ones(
+                        (q_len, k_len), device=in_features.device, dtype=torch.bool
+                    ),
+                    diagonal=k_len - q_len,
+                )
+            else:
+                assert isinstance(self.mask, torch.Tensor)
+                mask = self.mask[k_len - q_len : k_len, :k_len]
+
+            attention_output = scaled_dot_product_attention(
+                q, k, v, mask=mask
+            )  # (..., num_heads, seq_len, d_k)
 
         # Merge heads
         # (..., num_heads, seq_len, d_k) -> (..., seq_len, d_model)
         attention_output = rearrange(
             attention_output, "... heads seq d_k -> ... seq (heads d_k)"
         )
+
         return self.output_proj(attention_output)
+
+    def _paged_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        paged_ctx: PagedCacheContext,
+    ) -> torch.Tensor:
+        """Apply paged attention for continuous batching."""
+        # qkv of input (batch, num_heads, seq_len, d_k)
+        kv_manager = paged_ctx.kv_manager
+        layer_idx = paged_ctx.layer_idx
+        mode = paged_ctx.mode
+        if mode == "prefill":
+            assert paged_ctx.prefill_seq_id is not None
+            assert k.shape[0] == 1, (
+                "Prefill mode expects batch size of 1 for continuous batching."
+            )
+            attention_output = scaled_dot_product_attention(q, k, v)
+            k = rearrange(k, "1 heads seq d_k -> seq heads d_k")
+            v = rearrange(v, "1 heads seq d_k -> seq heads d_k")
+            kv_manager.write_kv(
+                paged_ctx.prefill_seq_id, layer_idx, k, v
+            )  # (batch, num_heads, seq_len, d_k)
+        elif mode == "decode":
+            assert paged_ctx.decode_seq_ids is not None
+            assert paged_ctx.seq_lens is not None
+            assert paged_ctx.block_tables is not None
+            assert k.shape[2] == 1, (
+                "Decode mode expects sequence length of 1 for incremental decoding."
+            )
+
+            q = rearrange(
+                q, "batch heads 1 d_k -> batch heads d_k"
+            )  # for paged attention, q shape should (num_seqs, num_heads, head_dim)
+            for i, seq_id in enumerate(paged_ctx.decode_seq_ids):
+                kv_manager.write_kv(
+                    seq_id, layer_idx, k[i, :, 0, :], v[i, :, 0, :]
+                )  # # (heads, d_k)
+
+            attention_output = paged_attention_decode(
+                q,
+                kv_manager.kv_caches[layer_idx].key_cache,
+                kv_manager.kv_caches[layer_idx].value_cache,
+                paged_ctx.block_tables,
+                paged_ctx.seq_lens,
+            )  # (num_seqs, num_heads, head_dim)
+            attention_output = rearrange(
+                attention_output, "batch heads d_k -> batch heads 1 d_k"
+            )  # to (batch, seq, num_heads, head_dim) for output projection
+        else:
+            msg = f"Unknown paged cache mode: {mode}"
+            raise ValueError(msg)
+        return attention_output
 
     def clear_kv_cache(self) -> None:
         """Clear the key and value caches."""
@@ -568,6 +653,7 @@ class TransformerBlock(nn.Module):
         token_positions: torch.Tensor | None = None,
         *,
         use_cache: bool = False,
+        paged_ctx: PagedCacheContext | None = None,
     ) -> torch.Tensor:
         """Apply Transformer block.
 
@@ -578,6 +664,7 @@ class TransformerBlock(nn.Module):
                 position cache via :meth:`_get_positions`.
             use_cache: If True, use and update the KV cache for incremental
                 decoding.
+            paged_ctx: Optional paged cache context for paged KV cache.
 
         Returns:
             Output tensor of shape (..., seq_len, d_model).
@@ -588,18 +675,22 @@ class TransformerBlock(nn.Module):
 
         if self.norm_strategy == "pre":
             attn_in = self.ln1(x) if self.ln1 is not None else x
-            x1 = x + self.attn(attn_in, token_positions, use_cache=use_cache)
+            x1 = x + self.attn(
+                attn_in, token_positions, use_cache=use_cache, paged_ctx=paged_ctx
+            )
             ffn_in = self.ln2(x1) if self.ln2 is not None else x1
             return x1 + self.ffn(ffn_in)
 
         if self.norm_strategy == "post":
-            x1 = x + self.attn(x, token_positions, use_cache=use_cache)
+            x1 = x + self.attn(
+                x, token_positions, use_cache=use_cache, paged_ctx=paged_ctx
+            )
             x1 = self.ln1(x1) if self.ln1 is not None else x1
             x2 = x1 + self.ffn(x1)
             return self.ln2(x2) if self.ln2 is not None else x2
 
         # norm_strategy == "none"  # noqa: ERA001
-        x1 = x + self.attn(x, token_positions, use_cache=use_cache)
+        x1 = x + self.attn(x, token_positions, use_cache=use_cache, paged_ctx=paged_ctx)
         return x1 + self.ffn(x1)
 
 
@@ -677,3 +768,67 @@ class TransformerLM(nn.Module):
         for block in self.layers:
             if isinstance(block, TransformerBlock):
                 block.attn.clear_kv_cache()
+
+    def prefill_with_paged_cache(
+        self, prompt_tokens: torch.Tensor, kv_manager: KVCacheManager, seq_id: int
+    ) -> torch.Tensor:
+        """Prefill the KV cache for single sequence with prompt tokens.
+
+        Used for continuous batching.
+        """
+        prompt_len = prompt_tokens.shape[-1]  # (1, prompt_len)
+        x = self.token_embeddings(prompt_tokens)  # (..., seq_len, d_model)
+        token_positions = torch.arange(prompt_len)  # (seq_len, )
+        kv_manager.allocate_slots(seq_id, prompt_len)
+        for layer_idx, block in enumerate(self.layers):
+            ctx = PagedCacheContext(
+                kv_manager=kv_manager,
+                layer_idx=layer_idx,
+                mode="prefill",
+                prefill_seq_id=seq_id,
+            )
+            x = block(
+                x,
+                token_positions,
+                paged_ctx=ctx,
+            )  # (..., seq_len, d_model)
+        kv_manager.advance_tokens(seq_id, prompt_len)
+        if self.ln_final is not None:
+            x = self.ln_final(x)  # (..., seq_len, d_model)
+        return self.lm_head(x)  # (..., seq_len, vocab_size)
+
+    def decode_with_paged_cache(
+        self,
+        input_ids: torch.Tensor,  # (batch, 1)
+        kv_manager: KVCacheManager,
+        seq_ids: list[int],
+        token_positions: torch.Tensor,  # (batch, 1)
+    ) -> torch.Tensor:
+        """Decode one token per sequence using paged KV cache."""
+        x = self.token_embeddings(input_ids)  # (..., seq_len, d_model)
+        for seq_id in seq_ids:
+            kv_manager.allocate_slots(seq_id, 1)
+        block_tables, seq_lens = kv_manager.build_block_tables(seq_ids)
+        seq_lens += 1  # for the current decoding step
+        # unsqueeze for RoPE broadcast: (batch, 1) → (batch, 1, 1)
+        # broadcastable to (batch, heads, 1, d_k/2)
+        token_positions = token_positions.unsqueeze(1)
+        for layer_idx, block in enumerate(self.layers):
+            ctx = PagedCacheContext(
+                kv_manager=kv_manager,
+                layer_idx=layer_idx,
+                mode="decode",
+                decode_seq_ids=seq_ids,
+                block_tables=block_tables,
+                seq_lens=seq_lens,
+            )
+            x = block(
+                x,
+                token_positions,
+                paged_ctx=ctx,
+            )  # (..., seq_len, d_model)
+        for seq_id in seq_ids:
+            kv_manager.advance_tokens(seq_id, 1)
+        if self.ln_final is not None:
+            x = self.ln_final(x)  # (..., seq_len, d_model)
+        return self.lm_head(x)  # (..., seq_len, vocab_size)

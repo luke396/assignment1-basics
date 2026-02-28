@@ -67,7 +67,11 @@ class KVCache:
     def write(
         self, block_id: int, slot: int, key: torch.Tensor, value: torch.Tensor
     ) -> None:
-        """Write key and value tensors to the cache at the specified block and slot."""
+        """Write key and value tensors of single token to the cache.
+
+        Writes to the specified block and slot.
+        The layout of key and value should be (num_heads, head_dim) for a single token.
+        """
         assert key.shape == (value.shape) == (self.num_heads, self.head_dim), (
             "Key and value tensors must have shape (num_heads, head_dim)"
         )
@@ -89,17 +93,22 @@ class KVCacheManager:
         block_size: int,
         num_heads: int,
         head_dim: int,
+        n_layers: int = 1,
     ) -> None:
         """Initialize the KV cache manager."""
         self.allocator = BlockAllocator(
             num_blocks=num_blocks,
         )
-        self.kv_cache = KVCache(
-            num_blocks=num_blocks,
-            block_size=block_size,
-            num_heads=num_heads,
-            head_dim=head_dim,
-        )
+        self.n_layers = n_layers
+        self.kv_caches = [
+            KVCache(
+                num_blocks=num_blocks,
+                block_size=block_size,
+                num_heads=num_heads,
+                head_dim=head_dim,
+            )
+            for _ in range(self.n_layers)
+        ]  # every layer has its own KVCache, block IDs are shared across layers
         self.block_size = block_size
         self.seq_to_block: dict[int, list[int]] = {}
         self.seq_to_num_tokens: dict[int, int] = {}
@@ -117,8 +126,12 @@ class KVCacheManager:
         seq_id: int,
         key: torch.Tensor,
         value: torch.Tensor,
-    ) -> tuple[int, int]:
+    ) -> None:
         """Append a token's key and value to the cache for the given sequence ID."""
+        assert self.n_layers == 1, "append_token currently only supports 1 layer"
+        self.append_token_all_layers(seq_id, [key], [value])
+
+    def _get_or_allocate_block(self, seq_id: int) -> tuple[int, int]:
         slot = self.seq_to_num_tokens[seq_id] % self.block_size
         if slot == 0:
             physical_block_id = self.allocator.allocate()
@@ -127,16 +140,23 @@ class KVCacheManager:
             block_id = self.seq_to_block[seq_id][-1]
             if self.allocator.need_cow(block_id):
                 new_block_id = self.allocator.allocate()
-                self.kv_cache.copy_block(block_id, new_block_id)
+                for cache in self.kv_caches:
+                    cache.copy_block(block_id, new_block_id)
                 self.allocator.free(block_id)
                 self.seq_to_block[seq_id][-1] = new_block_id
                 physical_block_id = new_block_id
             else:
                 physical_block_id = block_id
-
-        self.kv_cache.write(physical_block_id, slot, key, value)
-        self.seq_to_num_tokens[seq_id] += 1
         return physical_block_id, slot
+
+    def append_token_all_layers(
+        self, seq_id: int, keys: list[torch.Tensor], values: list[torch.Tensor]
+    ) -> None:
+        """Append one token's KV across all layers, sharing the same block/slot."""
+        physical_block_id, slot = self._get_or_allocate_block(seq_id)
+        for cache, key, value in zip(self.kv_caches, keys, values, strict=True):
+            cache.write(physical_block_id, slot, key, value)
+        self.seq_to_num_tokens[seq_id] += 1
 
     def get_block_ids(self, seq_id: int) -> list[int]:
         """Get the list of block IDs associated with the given sequence ID."""
@@ -159,7 +179,11 @@ class KVCacheManager:
     def build_block_tables(
         self, seq_ids: list[int]
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Assemble block_tables and seq_lens tensors for paged_attention_decode."""
+        """Assemble block_tables and seq_lens tensors for paged_attention_decode.
+
+        This returns block_tables and seq_lens for given sequence IDs,
+        which can be directly used in paged_attention_decode.
+        """
         block_ids_list = [self.get_block_ids(sid) for sid in seq_ids]
         max_blocks = max(len(b) for b in block_ids_list)
         block_tables = torch.zeros(len(seq_ids), max_blocks, dtype=torch.long)
@@ -176,6 +200,67 @@ class KVCacheManager:
             self.allocator.free(block_id)
         del self.seq_to_block[seq_id]
         del self.seq_to_num_tokens[seq_id]
+
+    def allocate_slots(self, seq_id: int, new_num_tokens: int) -> None:
+        """Allocate blocks and slots for upcoming tokens, handling COW if needed.
+
+        Not writing kv cahce, not advancing seq_to_num_tokens;
+        just ensure the necessary blocks are allocated and COW-ed if needed.
+        """
+        current = self.seq_to_num_tokens[seq_id]
+        slot = self.seq_to_num_tokens[seq_id] % self.block_size
+        for i in range(new_num_tokens):
+            pos = current + i
+            slot = pos % self.block_size
+            if slot == 0:
+                block_id = self.allocator.allocate()
+                self.seq_to_block[seq_id].append(block_id)
+            else:  # slot > 0, need to check COW
+                block_id = self.seq_to_block[seq_id][pos // self.block_size]
+                if self.allocator.need_cow(block_id):
+                    new_block_id = self.allocator.allocate()
+                    for cache in self.kv_caches:
+                        cache.copy_block(block_id, new_block_id)
+                    self.allocator.free(block_id)
+                    self.seq_to_block[seq_id][pos // self.block_size] = new_block_id
+
+    def write_kv(
+        self,
+        seq_id: int,
+        layer_idx: int,
+        layer_key: torch.Tensor,
+        layer_value: torch.Tensor,
+    ) -> None:
+        """Write key/value tensors to paged cache for a single layer.
+
+        The layout of k v should be (num_tokens, num_heads, head_dim) or
+        (num_heads, head_dim) for a single token.
+
+        Allocate blocks must have been done by allocate_slots()
+        before calling this function.
+
+        Does NOT advance seq_to_num_tokens; call advance_tokens() after all
+        layers are written.
+        """
+        # (num_heads, head_dim) -> (num_tokens, num_heads, head_dim)
+        dim_single_token = 2
+        if layer_key.dim() == dim_single_token:
+            layer_key = layer_key.unsqueeze(0)
+            layer_value = layer_value.unsqueeze(0)
+        cache = self.kv_caches[layer_idx]
+        base = self.seq_to_num_tokens[seq_id]
+        for t, (token_key, token_value) in enumerate(
+            zip(layer_key, layer_value, strict=True)
+        ):
+            # k v : (num_heads, head_dim)
+            pos = base + t
+            block_id = self.seq_to_block[seq_id][pos // self.block_size]
+            slot = pos % self.block_size
+            cache.write(block_id, slot, token_key, token_value)
+
+    def advance_tokens(self, seq_id: int, num_tokens: int) -> None:
+        """Advance token count after writing KV for multiple layers."""
+        self.seq_to_num_tokens[seq_id] += num_tokens
 
 
 def paged_attention_decode(

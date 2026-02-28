@@ -72,8 +72,8 @@ def test_basic_correctness() -> None:
     block_tables, seq_lens = manager.build_block_tables(seq_ids)
     actual = paged_attention_decode(
         q,
-        manager.kv_cache.key_cache,
-        manager.kv_cache.value_cache,
+        manager.kv_caches[0].key_cache,
+        manager.kv_caches[0].value_cache,
         block_tables,
         seq_lens,
     )
@@ -105,8 +105,8 @@ def test_single_token() -> None:
     block_tables, seq_lens = manager.build_block_tables([0])
     actual = paged_attention_decode(
         q,
-        manager.kv_cache.key_cache,
-        manager.kv_cache.value_cache,
+        manager.kv_caches[0].key_cache,
+        manager.kv_caches[0].value_cache,
         block_tables,
         seq_lens,
     )
@@ -140,8 +140,8 @@ def test_exact_block_boundary() -> None:
     block_tables, seq_lens = manager.build_block_tables([0])
     actual = paged_attention_decode(
         q,
-        manager.kv_cache.key_cache,
-        manager.kv_cache.value_cache,
+        manager.kv_caches[0].key_cache,
+        manager.kv_caches[0].value_cache,
         block_tables,
         seq_lens,
     )
@@ -210,8 +210,8 @@ def test_cow_fork() -> None:
     block_tables, seq_lens = manager.build_block_tables([0, 1])
     actual = paged_attention_decode(
         q,
-        manager.kv_cache.key_cache,
-        manager.kv_cache.value_cache,
+        manager.kv_caches[0].key_cache,
+        manager.kv_caches[0].value_cache,
         block_tables,
         seq_lens,
     )
