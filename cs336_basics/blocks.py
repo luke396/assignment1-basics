@@ -455,8 +455,18 @@ class MultiheadSelfAttention(nn.Module):
                 raise ValueError(msg)
             self.k_cache = k.detach()
             self.v_cache = v.detach()
+            q_len = q.shape[-2]
+            k_len = k.shape[-2]
+            causal_mask = torch.tril(
+                torch.ones(
+                    (q_len, k_len),
+                    device=in_features.device,
+                    dtype=torch.bool,
+                ),
+                diagonal=k_len - q_len,
+            )
             attention_output = scaled_dot_product_attention(
-                q, k, v
+                q, k, v, mask=causal_mask
             )  # (..., num_heads, seq_len, d_k)
         else:
             # no caching, full attention + causal mask
@@ -505,7 +515,15 @@ class MultiheadSelfAttention(nn.Module):
             assert k.shape[0] == 1, (
                 "Prefill mode expects batch size of 1 for continuous batching."
             )
-            attention_output = scaled_dot_product_attention(q, k, v)
+            seq_len = q.shape[-2]
+            causal_mask = torch.tril(
+                torch.ones(
+                    (seq_len, seq_len),
+                    device=q.device,
+                    dtype=torch.bool,
+                ),
+            )
+            attention_output = scaled_dot_product_attention(q, k, v, mask=causal_mask)
             k = rearrange(k, "1 heads seq d_k -> seq heads d_k")
             v = rearrange(v, "1 heads seq d_k -> seq heads d_k")
             kv_manager.write_kv(
