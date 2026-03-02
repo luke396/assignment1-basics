@@ -121,43 +121,6 @@ class KVCacheManager:
         self.seq_to_block[seq_id] = []
         self.seq_to_num_tokens[seq_id] = 0
 
-    def append_token(
-        self,
-        seq_id: int,
-        key: torch.Tensor,
-        value: torch.Tensor,
-    ) -> None:
-        """Append a token's key and value to the cache for the given sequence ID."""
-        assert self.n_layers == 1, "append_token currently only supports 1 layer"
-        self.append_token_all_layers(seq_id, [key], [value])
-
-    def _get_or_allocate_block(self, seq_id: int) -> tuple[int, int]:
-        slot = self.seq_to_num_tokens[seq_id] % self.block_size
-        if slot == 0:
-            physical_block_id = self.allocator.allocate()
-            self.seq_to_block[seq_id].append(physical_block_id)
-        else:  # slot > 0, need to check COW
-            block_id = self.seq_to_block[seq_id][-1]
-            if self.allocator.need_cow(block_id):
-                new_block_id = self.allocator.allocate()
-                for cache in self.kv_caches:
-                    cache.copy_block(block_id, new_block_id)
-                self.allocator.free(block_id)
-                self.seq_to_block[seq_id][-1] = new_block_id
-                physical_block_id = new_block_id
-            else:
-                physical_block_id = block_id
-        return physical_block_id, slot
-
-    def append_token_all_layers(
-        self, seq_id: int, keys: list[torch.Tensor], values: list[torch.Tensor]
-    ) -> None:
-        """Append one token's KV across all layers, sharing the same block/slot."""
-        physical_block_id, slot = self._get_or_allocate_block(seq_id)
-        for cache, key, value in zip(self.kv_caches, keys, values, strict=True):
-            cache.write(physical_block_id, slot, key, value)
-        self.seq_to_num_tokens[seq_id] += 1
-
     def get_block_ids(self, seq_id: int) -> list[int]:
         """Get the list of block IDs associated with the given sequence ID."""
         return self.seq_to_block[seq_id]

@@ -62,9 +62,9 @@ class SequenceStatus(Enum):
 @dataclass
 class Sequence:
     seq_id: int
+    status: SequenceStatus
     prompt_tokens: list[int]
     output_tokens: list[int]       # 逐步追加
-    status: SequenceStatus
     max_new_tokens: int
 ```
 
@@ -76,9 +76,9 @@ class Sequence:
 - `waiting: deque[Sequence]` — FIFO 等待队列
 - `running: list[Sequence]` — 正在生成的序列
 - `finished: list[Sequence]` — 已完成的序列
-- `max_num_seqs: int` — 最大并发序列数
+- `max_concurrent: int` — 最大并发序列数
 - `block_size: int` — 用于估算新请求所需 blocks
-- `num_free_blocks_fn: Callable[[], int]` — 查询当前可用 block 数
+- `free_block_num_fn: Callable[[], int]` — 查询当前可用 block 数
 
 **接口：**
 - `add_request(seq: Sequence)` — 加入 waiting 队列
@@ -89,8 +89,8 @@ class Sequence:
 ```python
 @dataclass
 class SchedulerOutput:
-    prefill_seqs: list[Sequence]   # 本轮需要 prefill 的序列
-    decode_seqs: list[Sequence]    # 本轮需要 decode 的序列
+    prefill_seq: list[Sequence]    # 本轮需要 prefill 的序列
+    decode_seq: list[Sequence]     # 本轮需要 decode 的序列
     freed_seq_ids: list[int]       # 本轮完成的序列 ID
 ```
 
@@ -98,9 +98,9 @@ class SchedulerOutput:
 ```
 1. 从 running 中移除 status == FINISHED 的序列 → freed_seq_ids
 2. 从 waiting 中取请求填入空位：
-   - 条件：len(running) < max_num_seqs AND num_free_blocks >= ceil(prompt_len / block_size)
+   - 条件：len(running) < max_concurrent AND num_free_blocks >= ceil(prompt_len / block_size)
    - 不满足则停止接纳（不做 preemption）
-3. 已在 running 且已完成 prefill（len(output_tokens) > 0）的序列 → decode_seqs
+3. 已在 running 且已完成 prefill（len(output_tokens) > 0）的序列 → decode_seq
 ```
 
 > **未实现：Preemption**
@@ -122,7 +122,7 @@ block 管理逻辑（register、free、build_block_tables、fork）与层数无�
 **已完成的改动：**
 - `__init__` 新增 `n_layers=1`，`self.kv_cache` → `self.kv_caches: list[KVCache]`（已实现）
 
-**删除 `append_token` / `append_token_all_layers`，统一为 `write_kv` + `advance_tokens`。**
+**已删除 `append_token` / `append_token_all_layers`，统一为 `write_kv` + `advance_tokens`。**
 
 原有的 `append_token` 系列将"写入"和"推进位置计数器"绑定在一起，按 token 遍历所有层。
 拆层执行时（for layer → for token），同一个 token 的不同层会多次触发计数器推进，导致位置错误。
@@ -132,7 +132,7 @@ block 管理逻辑（register、free、build_block_tables、fork）与层数无�
 - `register_sequence`、`build_block_tables`、`free_sequence`、`fork_sequence` — 不变
 
 **改动方法：**
-- `allocate_slots(seq_id: int, num_new_tokens: int)`
+- `allocate_slots(seq_id: int, new_num_tokens: int)`
   - 为即将写入的新 token 预分配 block，不写入任何数据，不修改 `seq_to_num_tokens`
   - 对齐 vLLM 的 `KVCacheManager.allocate_slots`：分配阶段和写入阶段完全分离
   - prefill 和 decode 都必须先调 `allocate_slots`，再调 `write_kv`
@@ -147,7 +147,7 @@ block 管理逻辑（register、free、build_block_tables、fork）与层数无�
   - 推进 `seq_to_num_tokens`，在所有层的 `write_kv` 完成后由调用方显式调用
   - prefill 后调 `advance_tokens(seq_id, prompt_len)`，decode 每步调 `advance_tokens(seq_id, 1)`
 
-**删除 `_get_or_allocate_block`。** 原方法将"定位写入位置"和"分配 block"耦合，导致：
+**已删除 `_get_or_allocate_block`。** 原方法将"定位写入位置"和"分配 block"耦合，导致：
 1. `write_kv` 多 token 写入时 `seq_to_num_tokens` 不变，每个 token 都算出相同的 slot（prefill bug）
 2. 与 `allocate_slots` 预分配冲突，`slot == 0` 时重复分配
 拆分为 `allocate_slots`（纯分配）+ `write_kv` 内部纯位置计算，彻底消除耦合。
@@ -175,8 +175,6 @@ class ContinuousBatchingEngine:
     model: TransformerLM
     kv_manager: KVCacheManager
     scheduler: Scheduler
-    temperature: float
-    top_p: float
     eos_token_id: int
 ```
 
@@ -197,12 +195,12 @@ def run(requests: list[tuple[int, Sequence]]) -> list[Sequence]:
             kv_manager.free_sequence(seq_id)
 
         # Prefill（逐个序列，模型侧封装）
-        for seq in output.prefill_seqs:
+        for seq in output.prefill_seq:
             _prefill(seq)
 
         # Decode（batch 化，模型侧封装）
-        if output.decode_seqs:
-            _decode_batch(output.decode_seqs)
+        if output.decode_seq:
+            _decode_batch(output.decode_seq)
 
         step += 1
     return scheduler.finished
@@ -232,9 +230,9 @@ class PagedCacheContext:
     layer_idx: int
     mode: Literal["prefill", "decode"]
     # prefill
-    seq_id: int | None = None
+    prefill_seq_id: int | None = None
     # decode
-    seq_ids: list[int] | None = None
+    decode_seq_ids: list[int] | None = None
     block_tables: Tensor | None = None
     seq_lens: torch.Tensor | None = None
 ```
@@ -256,16 +254,16 @@ def forward(self, x, token_positions, *, use_cache=False, paged_ctx=None):
         kv_manager, layer_idx = ctx.kv_manager, ctx.layer_idx
 
         if ctx.mode == "prefill":
+            # 标准 causal attention（直接用刚算出的 k, v，不从 cache 读）
+            attn_out = scaled_dot_product_attention(q, k, v, is_causal=True)
             # layout 转换: (1, num_heads, seq_len, head_dim) → (seq_len, num_heads, head_dim)
             k_cache = rearrange(k[0], "heads seq d_k -> seq heads d_k")
             v_cache = rearrange(v[0], "heads seq d_k -> seq heads d_k")
-            kv_manager.write_kv(ctx.seq_id, layer_idx, k_cache, v_cache)
-            # 标准 causal attention（直接用刚算出的 k, v，不从 cache 读）
-            attn_out = scaled_dot_product_attention(q, k, v, is_causal=True)
+            kv_manager.write_kv(ctx.prefill_seq_id, layer_idx, k_cache, v_cache)
 
         else:  # decode
             # layout 转换: 逐序列 (num_heads, 1, head_dim) → (num_heads, head_dim)
-            for i, sid in enumerate(ctx.seq_ids):
+            for i, sid in enumerate(ctx.decode_seq_ids):
                 kv_manager.write_kv(sid, layer_idx, k[i, :, 0, :], v[i, :, 0, :])
             # Paged attention（从 cache 读取所有历史 K/V，包括刚写入的新 token）
             # block_tables 和 seq_lens 由 decode_with_paged_cache 预先构建，
@@ -304,11 +302,11 @@ def forward(self, x, token_positions=None, *, use_cache=False, paged_ctx=None):
 2. positions = torch.arange(prompt_len)
 3. kv_manager.allocate_slots(seq_id, prompt_len)  # 预分配所有 prompt token 的 block
 4. for layer_idx, block in enumerate(self.layers):
-       ctx = PagedCacheContext(kv_manager, layer_idx, mode="prefill", seq_id=seq_id)
+       ctx = PagedCacheContext(kv_manager, layer_idx, mode="prefill", prefill_seq_id=seq_id)
        x = block(x, positions, paged_ctx=ctx)
 5. kv_manager.advance_tokens(seq_id, prompt_len)
 6. logits = self.lm_head(self.ln_final(x))  # (1, prompt_len, vocab)
-7. return logits[:, -1, :]
+7. return logits
 ```
 
 `decode_with_paged_cache(input_ids, kv_manager, seq_ids, token_positions)`:
@@ -316,14 +314,14 @@ def forward(self, x, token_positions=None, *, use_cache=False, paged_ctx=None):
 1. x = self.token_embeddings(input_ids)  # (batch, 1, d_model)
 2. # 预分配 block（对齐 vLLM：Scheduler 阶段分配，Forward 阶段只写入）
    for sid in seq_ids:
-       kv_manager.allocate_slots(sid, num_new_tokens=1)
+       kv_manager.allocate_slots(sid, new_num_tokens=1)
 3. # 构建 block_tables（预分配后已包含新 token 的 block，layer 循环内不会变）
    block_tables, seq_lens = kv_manager.build_block_tables(seq_ids)
    # seq_lens 需要 +1：advance_tokens 尚未调用，seq_to_num_tokens 还是旧值
    seq_lens = seq_lens + 1
 4. for layer_idx, block in enumerate(self.layers):
        ctx = PagedCacheContext(kv_manager, layer_idx, mode="decode",
-                               seq_ids=seq_ids, block_tables=block_tables, seq_lens=seq_lens)
+                               decode_seq_ids=seq_ids, block_tables=block_tables, seq_lens=seq_lens)
        x = block(x, token_positions, paged_ctx=ctx)
 5. for sid in seq_ids:
        kv_manager.advance_tokens(sid, 1)

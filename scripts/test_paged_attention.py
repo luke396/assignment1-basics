@@ -59,8 +59,9 @@ def test_basic_correctness() -> None:
         v_tokens = torch.randn(slen, num_heads, head_dim)
         all_k.append(k_tokens)
         all_v.append(v_tokens)
-        for t in range(slen):
-            manager.append_token(sid, k_tokens[t], v_tokens[t])
+        manager.allocate_slots(sid, slen)
+        manager.write_kv(sid, 0, k_tokens, v_tokens)
+        manager.advance_tokens(sid, slen)
 
     # Random query (decode: 1 token per seq)
     q = torch.randn(num_seqs, num_heads, head_dim)
@@ -97,7 +98,9 @@ def test_single_token() -> None:
 
     k = torch.randn(num_heads, head_dim)
     v = torch.randn(num_heads, head_dim)
-    manager.append_token(0, k, v)
+    manager.allocate_slots(0, 1)
+    manager.write_kv(0, 0, k, v)
+    manager.advance_tokens(0, 1)
 
     q = torch.randn(1, num_heads, head_dim)
 
@@ -131,8 +134,9 @@ def test_exact_block_boundary() -> None:
 
     k_tokens = torch.randn(seq_len, num_heads, head_dim)
     v_tokens = torch.randn(seq_len, num_heads, head_dim)
-    for t in range(seq_len):
-        manager.append_token(0, k_tokens[t], v_tokens[t])
+    manager.allocate_slots(0, seq_len)
+    manager.write_kv(0, 0, k_tokens, v_tokens)
+    manager.advance_tokens(0, seq_len)
 
     q = torch.randn(1, num_heads, head_dim)
 
@@ -167,8 +171,9 @@ def test_cow_fork() -> None:
     # Shared prompt
     k_prompt = torch.randn(prompt_len, num_heads, head_dim)
     v_prompt = torch.randn(prompt_len, num_heads, head_dim)
-    for t in range(prompt_len):
-        manager.append_token(0, k_prompt[t], v_prompt[t])
+    manager.allocate_slots(0, prompt_len)
+    manager.write_kv(0, 0, k_prompt, v_prompt)
+    manager.advance_tokens(0, prompt_len)
 
     # Fork: seq 1 shares blocks with seq 0
     manager.fork_sequence(0, 1)
@@ -184,8 +189,12 @@ def test_cow_fork() -> None:
     k_new_1 = torch.randn(num_heads, head_dim)
     v_new_1 = torch.randn(num_heads, head_dim)
 
-    manager.append_token(0, k_new_0, v_new_0)
-    manager.append_token(1, k_new_1, v_new_1)
+    manager.allocate_slots(0, 1)
+    manager.write_kv(0, 0, k_new_0, v_new_0)
+    manager.advance_tokens(0, 1)
+    manager.allocate_slots(1, 1)
+    manager.write_kv(1, 0, k_new_1, v_new_1)
+    manager.advance_tokens(1, 1)
 
     # After CoW, last blocks should differ
     blocks_0_after = manager.get_block_ids(0)
